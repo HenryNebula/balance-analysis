@@ -1,0 +1,4 @@
+[submodule "transtractor"]
+	path = transtractor
+	url = https://github.com/HenryNebula/transtractor-lib.git
+	branch = feat/llm-fallback

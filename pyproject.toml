@@ -1,0 +1,15 @@
+[project]
+name = "balance-analysis"
+version = "0.1.0"
+description = "Bank statement ingestion: extraction engine A/B (transtractor fork vs bankstatementparser) and review pipeline"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    # Engine A: fork of transtractor with the built-in local-LLM fallback
+    # (maturin-built from the local checkout, with the `llm` cargo feature on).
+    "transtractor",
+    # Engine B: deterministic ISO-20022/OFX/CSV parsers + LLM/vision PDF path
+    "bankstatementparser[hybrid,hybrid-vision]",
+]
+
+[tool.uv.sources]
+transtractor = { path = "transtractor" }

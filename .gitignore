@@ -1,0 +1,24 @@
+# Statements are real financial data — never commit PDFs
+*.pdf
+
+# Machine-specific uv paths (disks differ per machine)
+.envrc
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+cov-*.xml
+coverage.xml
+
+# Rust build artifacts (the fork is a submodule)
+transtractor/target/
+
+# Scratch outputs
+last_draft.json
+ab_report.json
+
+# uv project cache dirs created on some machines
+.uv/
