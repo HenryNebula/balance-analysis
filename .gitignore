@@ -4,6 +4,9 @@
 # Machine-specific uv paths (disks differ per machine)
 .envrc
 
+# Local endpoint configuration (may contain the LAN server address/api key)
+.env
+
 # Python
 __pycache__/
 *.pyc

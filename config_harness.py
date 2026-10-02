@@ -29,7 +29,11 @@ import time
 import urllib.request
 from pathlib import Path
 
+from envloader import load_env
 from transtractor import ConfigLoadError, ParseError, Parser
+
+# .env in the project root is the default configuration (exports override it).
+load_env()
 
 # Endpoint is LAN-portable: point at the machine running llama-server with
 # TRANSTRACTOR_LLM_URL=http://<server-ip>:30000/v1 (same variable the fork's
@@ -37,7 +41,8 @@ from transtractor import ConfigLoadError, ParseError, Parser
 BASE_URL = os.environ.get("TRANSTRACTOR_LLM_URL", "http://127.0.0.1:30000/v1")
 MODEL = os.environ.get("TRANSTRACTOR_LLM_MODEL", "qwen3.5-4b")
 TIMEOUT = int(os.environ.get("TRANSTRACTOR_LLM_TIMEOUT", "600"))
-REGISTRY = Path("configs")
+ROUNDS = int(os.environ.get("TRANSTRACTOR_LLM_ROUNDS", "5"))
+REGISTRY = Path(os.environ.get("TRANSTRACTOR_LLM_CONFIG_DIR", "configs"))
 
 # --- Static prompt material -------------------------------------------------
 
@@ -678,7 +683,13 @@ def draft_config(pdfs: list[Path], rounds: int) -> tuple[dict | None, bool, list
 def main() -> int:
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("pdfs", nargs="+", type=Path, help="statements from one bank")
-    cli.add_argument("--rounds", type=int, default=5)
+    cli.add_argument(
+        "--rounds",
+        type=int,
+        default=ROUNDS,
+        help=f"correction turns for the drafting loop (default {ROUNDS}, from "
+        "TRANSTRACTOR_LLM_ROUNDS or .env)",
+    )
     args = cli.parse_args()
 
     print(f"config harness: {len(args.pdfs)} statement(s), {MODEL} at {BASE_URL}")

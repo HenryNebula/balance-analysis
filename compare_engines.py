@@ -20,6 +20,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from envloader import load_env
+
+# .env in the project root is the default configuration (exports override it).
+load_env()
+
 BASE_URL = os.environ.get("TRANSTRACTOR_LLM_URL", "http://127.0.0.1:30000/v1")
 MODEL = os.environ.get("TRANSTRACTOR_LLM_MODEL", "qwen3.5-4b")
 TIMEOUT = int(os.environ.get("TRANSTRACTOR_LLM_TIMEOUT", "600"))
