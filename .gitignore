@@ -23,5 +23,8 @@ transtractor/target/
 last_draft.json
 ab_report.json
 
+# Per-run harness traces (contain statement text)
+logs/
+
 # uv project cache dirs created on some machines
 .uv/

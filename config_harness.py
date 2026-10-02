@@ -22,6 +22,9 @@ engine remains the authority. Disable with --no-extraction-hint.
 Usage (from balance-analysis/):
     uv run python config_harness.py statement1.pdf [statement2.pdf ...]
     uv run python config_harness.py --rounds 6 stmt_jan.pdf stmt_feb.pdf
+
+Each run appends a full trace (prompts, raw model responses, evaluations,
+feedback) under logs/ — see TRANSTRACTOR_LLM_TRACE_DIR to relocate.
 """
 
 from __future__ import annotations
@@ -1112,11 +1115,53 @@ def extraction_hints(sd: object, layout_text: str) -> str:
     return "\n".join(parts)[:3500]
 
 
+# --- Run trace -----------------------------------------------------------------
+#
+# Every run appends a full trace under logs/: the round-0 prompt material
+# (layout dumps, deterministic suggestions, extraction hints), each RAW model
+# response, the parsed draft, the deterministic evaluation and the exact
+# feedback sent back. A run that fails on another machine can then be
+# reconstructed — and debugged — from the log alone. Set
+# TRANSTRACTOR_LLM_TRACE_DIR to relocate; stdout keeps the short summary.
+
+
+class Trace:
+    """Append-only, flushed-as-written run log (survives crashes)."""
+
+    def __init__(self, pdfs: list[Path]):
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        stem = re.sub(r"[^A-Za-z0-9_-]+", "_", pdfs[0].stem)[:40] if pdfs else "run"
+        directory = Path(os.environ.get("TRANSTRACTOR_LLM_TRACE_DIR", "logs"))
+        directory.mkdir(parents=True, exist_ok=True)
+        self.path = directory / f"harness_{stem}_{stamp}.log"
+        self._file = self.path.open("a", encoding="utf-8")
+        self.log(
+            "run start",
+            f"model={MODEL} at {BASE_URL}\npdfs={[str(pdf) for pdf in pdfs]}",
+        )
+
+    def log(self, section: str, body: str = "") -> None:
+        self._file.write(
+            f"\n{'=' * 78}\n[{time.strftime('%H:%M:%S')}] {section}\n{'-' * 78}\n{body}\n"
+        )
+        self._file.flush()
+
+    def line(self, text: str) -> None:
+        self._file.write(f"{text}\n")
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
+
+
 # --- The loop ----------------------------------------------------------------
 
 
 def draft_config(
-    pdfs: list[Path], rounds: int, use_extraction_hint: bool = True
+    pdfs: list[Path],
+    rounds: int,
+    use_extraction_hint: bool = True,
+    trace: Trace | None = None,
 ) -> tuple[dict | None, bool, list[dict]]:
     """Returns (best config or None, verified?, round history)."""
     layouts = {pdf: layout_dump(pdf) for pdf in pdfs}
@@ -1127,8 +1172,12 @@ def draft_config(
     if use_extraction_hint:
         sd, note = llm_extraction_pass(pdfs[0])
         print(f"extraction hint pass: {note}")
+        if trace:
+            trace.log("extraction hint pass", note)
         if sd is not None and sd.transactions:
             hint = extraction_hints(sd, layouts[pdfs[0]])
+            if trace:
+                trace.log("extraction-derived hints", hint)
     suggestions = format_suggestions(observations)
     if suggestions:
         observations += (
@@ -1145,6 +1194,8 @@ def draft_config(
             "DERIVED from the matched printed tokens (the extraction's own "
             f"numbers are not data):\n{hint}"
         )
+    if trace:
+        trace.log("round 0 prompt material", observations)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Layout dumps:\n{observations}\n\nWrite the configuration."},
@@ -1155,10 +1206,19 @@ def draft_config(
 
     for round_number in range(rounds):
         started = time.perf_counter()
+        raw = ""
         try:
-            config_json = extract_json(chat(messages))
+            raw = chat(messages)
+            if trace:
+                trace.log(f"round {round_number} raw model response", raw)
+            config_json = extract_json(raw)
         except ValueError as error:
             print(f"round {round_number}: LLM produced unusable output ({error}); retrying")
+            if trace:
+                trace.log(
+                    f"round {round_number} unusable response",
+                    f"{error}\n--- raw ---\n{raw[:4000]}",
+                )
             messages.append({"role": "assistant", "content": "(invalid JSON)"})
             messages.append({"role": "user", "content": "Return only the JSON object."})
             continue
@@ -1200,10 +1260,17 @@ def draft_config(
                     break
         key = config_json.get("key", "?")
         auto = f" | auto-aligned: {', '.join(applied)}" if applied else ""
-        print(
+        round_line = (
             f"round {round_number}: key={key} -> {summary} ({elapsed:.1f}s)"
             f"{detail}{changed}{auto}"
         )
+        print(round_line)
+        if trace:
+            trace.line(round_line)
+            trace.log(
+                f"round {round_number} evaluation",
+                json.dumps(evaluation, indent=2, default=str)[:6000],
+            )
         history.append({"round": round_number, "key": key, "outcome": summary})
 
         if evaluation.get("verified"):
@@ -1215,12 +1282,19 @@ def draft_config(
 
         messages.append({"role": "assistant", "content": json.dumps(config_json)})
         feedback = build_feedback(evaluation, pdfs, config_json)
+        if trace:
+            trace.log(f"round {round_number} feedback sent", feedback)
         if changed == " (unchanged!)":
             # The model parroted its previous answer in the long conversation.
             # Escalate: reset to a short, direct instruction with the specific
             # fix named — small models comply with direct edits, not essays.
             # The extraction-derived evidence stays pinned: a fresh context
             # must not lose the strongest signal about the real table shape.
+            if trace:
+                trace.line(
+                    f"round {round_number}: escalation — context reset to a "
+                    "direct instruction (model parroted its previous answer)"
+                )
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -1267,15 +1341,27 @@ def main() -> int:
     )
     args = cli.parse_args()
 
+    trace = Trace(args.pdfs)
     print(f"config harness: {len(args.pdfs)} statement(s), {MODEL} at {BASE_URL}")
+    print(f"trace: {trace.path}")
     config, verified, history = draft_config(
-        args.pdfs, args.rounds, use_extraction_hint=not args.no_extraction_hint
+        args.pdfs,
+        args.rounds,
+        use_extraction_hint=not args.no_extraction_hint,
+        trace=trace,
     )
     if config is None:
+        trace.log("result", "FAILED: no configuration parsed any statement cleanly.")
+        trace.log("round history", json.dumps(history, indent=2))
+        trace.close()
         print("\nFAILED: no configuration parsed any statement cleanly.")
         print(json.dumps(history, indent=2))
         return 1
     if not verified:
+        trace.log("result", "FAILED: best config parsed some, not all, statements.")
+        trace.log("best config", json.dumps(config, indent=2))
+        trace.log("round history", json.dumps(history, indent=2))
+        trace.close()
         print("\nFAILED: best config parsed some, not all, statements cleanly.")
         print(json.dumps(history, indent=2))
         return 1
@@ -1286,15 +1372,20 @@ def main() -> int:
     print(f"\nVERIFIED config saved: {out_path}")
     print("Reuse with zero LLM:")
     print(f"  parser = Parser(); parser.load({str(out_path)!r}); parser.parse('statement.pdf')")
+    trace.log("result", f"VERIFIED config saved: {out_path}")
+    trace.log("verified config", json.dumps(config, indent=2))
     # Final deterministic confirmation with a fresh rules-only parser:
     parser = Parser(rules_only=True)
     parser.load(str(out_path))
     for pdf in args.pdfs:
         sd = parser.parse(str(pdf))
-        print(
+        line = (
             f"  {pdf.name}: {len(sd.transactions)} transactions, "
             f"opening {sd.opening_balance:.2f} -> closing {sd.closing_balance:.2f}"
         )
+        print(line)
+        trace.line(line)
+    trace.close()
     return 0
 
 
