@@ -405,6 +405,19 @@ def evaluate(config_json: dict, pdfs: list[Path]) -> dict:
                     "first_error": first_error,
                 }
             )
+        except Exception as error:  # noqa: BLE001 - engine panics etc. become round feedback
+            # Anything else (including pyo3 PanicException from engine
+            # invariants) is reported as a failed attempt so the loop can
+            # revise instead of crashing.
+            results.append(
+                {
+                    "pdf": pdf.name,
+                    "ok": False,
+                    "error": f"{type(error).__name__}: {error}",
+                    "rows": 0,
+                    "first_error": f"{type(error).__name__}: {str(error)[:160]}",
+                }
+            )
     return {
         "stage": "parse",
         "results": results,
