@@ -375,7 +375,9 @@ def header_text(pdf: Path, lines: int = 8) -> str:
 
 def evaluate(config_json: dict, pdfs: list[Path]) -> dict:
     """Deterministically verify a drafted config against every statement."""
-    parser = Parser()
+    # rules_only: a failing draft must surface as a rules-engine failure for
+    # the revision loop; never fall back to the LLM endpoint here.
+    parser = Parser(rules_only=True)
     try:
         parser.load_str(json.dumps(config_json))
     except ConfigLoadError as error:
@@ -435,7 +437,7 @@ def debug_report(config_json: dict, pdf: Path) -> str:
     contained here so a drafting round degrades to less feedback instead of
     killing the process.
     """
-    parser = Parser()
+    parser = Parser(rules_only=True)
     try:
         parser.load_str(json.dumps(config_json))
     except ConfigLoadError:
@@ -481,7 +483,7 @@ def debug_excerpt(pdf: Path, config_json: dict, limit: int = 2400) -> str:
 
 def table_diagnostics_excerpt(pdf: Path, config_json: dict, limit: int = 2400) -> str:
     """Engine-side per-line table diagnostics for the drafted config."""
-    parser = Parser()
+    parser = Parser(rules_only=True)
     try:
         parser.load_str(json.dumps(config_json))
     except ConfigLoadError:
@@ -760,8 +762,8 @@ def main() -> int:
     print(f"\nVERIFIED config saved: {out_path}")
     print("Reuse with zero LLM:")
     print(f"  parser = Parser(); parser.load({str(out_path)!r}); parser.parse('statement.pdf')")
-    # Final deterministic confirmation with a fresh parser:
-    parser = Parser()
+    # Final deterministic confirmation with a fresh rules-only parser:
+    parser = Parser(rules_only=True)
     parser.load(str(out_path))
     for pdf in args.pdfs:
         sd = parser.parse(str(pdf))
