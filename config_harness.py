@@ -12,6 +12,13 @@ Loop per round:
       -> parse every provided statement (Rust rules engine)
       -> all clean? save to registry : build feedback and revise
 
+Before round 0 the fork's LLM extraction fallback is run ONCE on the first
+statement (lenient best attempt) and its values are matched back onto layout
+tokens: which lines are transaction rows, the column order of each, per-role
+formats, column alignments and Debit/Credit sign evidence are then DERIVED
+from the matched printed tokens. The extraction is a hint only — the rules
+engine remains the authority. Disable with --no-extraction-hint.
+
 Usage (from balance-analysis/):
     uv run python config_harness.py statement1.pdf [statement2.pdf ...]
     uv run python config_harness.py --rounds 6 stmt_jan.pdf stmt_feb.pdf
@@ -46,18 +53,26 @@ REGISTRY = Path(os.environ.get("TRANSTRACTOR_LLM_CONFIG_DIR", "configs"))
 
 # --- Static prompt material -------------------------------------------------
 
-FORMAT_CATALOG = """Amount/Balance formats (all yield signed decimals):
+FORMAT_CATALOG = """Amount/Balance formats (all yield signed decimals, cents REQUIRED):
 - format1: "1,234.56" -> 1234.56 | "-1,234.56" -> -1234.56 | "1,234.56-" -> -1234.56
 - format2: "$1,234.56" -> 1234.56 | "-$1,234.56" -> -1234.56
 - format3: "$1,234.56 CR" -> 1234.56 | "$1,234.56 DR" -> -1234.56
 - format4: "1,234.56 CR" -> 1234.56 | "1,234.56 DR" -> -1234.56
 - format5: "nil" -> 0.00
-- format6: "- $1,234" -> -1234.00 | "+ $1,234" -> 1234.00
-- format7: "$1,234.56<any suffix>" -> 1234.56
-IMPORTANT: format1-4 require comma grouping for amounts of 1,000 and above
-("25,000.00" parses; "25000.00" does not). Match the format to EXACTLY how the
-statement prints amounts, including any $, CR/DR suffixes: "$50,000.00 CR" is
-format3, "90,350 CR" is format4. Check the layout dump for suffixes.
+- format6: "- $1,234.56" -> -1234.56 | "+ $1,234.56" -> 1234.56 (sign REQUIRED)
+- format7: "$1,234.56⧫" -> 1234.56 (the ⧫ character after the amount)
+IMPORTANT contracts:
+1. format1-4 require comma grouping for 1,000 and above ("25,000.00" parses;
+   "25000.00" and "3978.53 CR" do NOT) and exactly two decimals ("1,234.5"
+   fails). format6 is the only format that accepts ungrouped digits.
+2. The parser reads the statement as whitespace-separated WORDS, so it does
+   not matter whether "CR"/"DR" is glued to the number ("90,350 CR") or
+   printed as its own item — format3/format4 cover both. A balance column
+   whose values match NO format (e.g. ungrouped) can simply be omitted from
+   transaction_formats; the engine then derives the running balance itself.
+3. Match the format to EXACTLY how the statement prints amounts, including $
+   and CR/DR: "$50,000.00 CR" is format3, "90,350 CR" is format4. Check the
+   layout dump.
 Date formats (all yield YYYY-MM-DD):
 - format1: "24 Mar" / "24 March" (year inferred)
 - format2: "24 Mar 2025" | "1 Jan 2025"
@@ -248,21 +263,95 @@ DATE_FORMAT_REGEXES = {
     "format13": r"^\d{4}-\d{1,2}-\d{1,2}$",
 }
 
+# Engine-exact amount word recognition, mirroring transtractor's
+# src/formats/amount/* (which lowercases input before matching). The regexes
+# above are intentionally looser: they classify printed items for shape
+# analysis. THESE decide which format id a config can actually declare.
+#
+# Key engine fact (src/parsers/flows/text_items_to_statement_datas.rs): every
+# printed item is tokenised into whitespace WORDS before parsing, each word
+# inheriting the item's coordinates. So classification operates on the
+# flattened word sequence of a layout line — whether "CR"/"DR" is glued into
+# the same item or printed separately is irrelevant; format3/format4 simply
+# consume the number word plus the following CR/DR word.
+ENGINE_NUM_PLAIN = r"^-?\d{1,3}(,\d{3})*\.\d{2}$"
+ENGINE_NUM_CURRENCY = r"^-?\$\d{1,3}(,\d{3})*\.\d{2}$"
+ENGINE_NIL = r"^[Nn]il$"
+ENGINE_SIGNED = r"^([+-])\s+\$([\d,]+\.\d{2})$"
+CR_DR_ITEMS = {"cr", "dr"}
+
+
+def line_words(tokens: list[str]) -> list[str]:
+    """Flatten a layout line's items into the word sequence the engine sees."""
+    return [word for token in tokens for word in token.split()]
+
+
+def engine_amount_format(words: list[str], index: int) -> str | None:
+    """The engine amount format id that can parse the amount starting at
+    words[index], or None when NO engine format can parse it — missing comma
+    grouping above 999 or missing cents are the common real-world causes."""
+    word = words[index].strip()
+    next_is_crdr = (
+        index + 1 < len(words) and words[index + 1].strip().lower() in CR_DR_ITEMS
+    )
+    if re.match(ENGINE_NUM_PLAIN, word):
+        return "format4" if next_is_crdr else "format1"
+    if re.match(ENGINE_NUM_CURRENCY, word):
+        return "format3" if next_is_crdr else "format2"
+    if re.match(ENGINE_NIL, word):
+        return "format5"
+    if re.match(ENGINE_SIGNED, word):
+        return "format6"
+    if word.endswith("⧫") and re.match(ENGINE_NUM_CURRENCY, word[:-1].strip()):
+        return "format7"
+    return None
+
+
+# Money-shaped words the engine nonetheless cannot parse (used only to warn):
+# any decimal number, or any number with a CR/DR suffix.
+LOOSE_MONEY_WORD_CENTS = r"(?i)^[-+]?\$?[\d,]+\.\d{1,2}(cr|dr)?$"
+LOOSE_MONEY_WORD_SUFFIX = r"(?i)^[-+]?\$?[\d,]+(?:\.\d+)?\s*(?:cr|dr)$"
+
 
 def format_suggestions(layout_text: str) -> str:
-    """Match tokens from the layout dump against every format's regex and
-    report which formats the document's own text satisfies, with samples."""
+    """Match the layout dump's own words against the ENGINE's format
+    definitions (format3/4 consume the number word plus a following CR/DR
+    word) and report which format ids the document satisfies. Money-shaped
+    words no engine format can parse are reported too."""
     tokens = re.findall(r'\["([^"]+)"', layout_text)
     lines = []
-    for kind, catalog in (("amount", AMOUNT_FORMAT_REGEXES), ("date", DATE_FORMAT_REGEXES)):
-        matched = {}
-        for token in tokens:
-            for name, pattern in catalog.items():
-                if re.match(pattern, token.strip()):
-                    matched.setdefault(name, set()).add(token.strip())
-        for name, samples in sorted(matched.items(), key=lambda kv: -len(kv[1])):
+    matched_amounts: dict[str, set[str]] = {}
+    unparseable: set[str] = set()
+    for line_tokens in (
+        LAYOUT_ITEM_RE.findall(line) for line in layout_text.splitlines()
+    ):
+        words = line_words(line_tokens)
+        for index, word in enumerate(words):
+            name = engine_amount_format(words, index)
+            if name is not None:
+                matched_amounts.setdefault(name, set()).add(word)
+            elif re.match(LOOSE_MONEY_WORD_CENTS, word) or re.match(
+                LOOSE_MONEY_WORD_SUFFIX, word
+            ):
+                unparseable.add(word)
+    for name, samples in sorted(matched_amounts.items(), key=lambda kv: -len(kv[1])):
+        examples = ", ".join(f"'{s}'" for s in sorted(samples)[:3])
+        lines.append(f"- amount format {name} matches {len(samples)} words, e.g. {examples}")
+    for name, pattern in DATE_FORMAT_REGEXES.items():
+        samples = {token.strip() for token in tokens if re.match(pattern, token.strip())}
+        if samples:
             examples = ", ".join(f"'{s}'" for s in sorted(samples)[:3])
-            lines.append(f"- {kind} format {name} matches {len(samples)} tokens, e.g. {examples}")
+            lines.append(f"- date format {name} matches {len(samples)} tokens, e.g. {examples}")
+    if unparseable:
+        examples = ", ".join(f"'{s}'" for s in sorted(unparseable)[:3])
+        lines.append(
+            f"- WARNING: {len(unparseable)} money-shaped words (e.g. {examples}) "
+            "match NO engine amount format — usually missing comma grouping above "
+            "999 ('3978.53 CR') or missing cents. No declared format can read "
+            "them: for a balance column, declare transaction_formats WITHOUT it "
+            "and the engine derives the running balance; an amount column this "
+            "broken cannot be parsed by the rules engine at all."
+        )
     return "\n".join(lines)
 
 
@@ -620,14 +709,426 @@ def derive_alignments(config: dict, layout_text: str) -> list[str]:
     return applied
 
 
+# --- LLM extraction hint pass --------------------------------------------------
+#
+# On real statements the drafting loop can fail to converge: the layout dump
+# alone leaves the model guessing WHICH numbers are transactions, where the
+# balances are labelled and how debits are printed. The fork's extraction
+# fallback already answers those questions (same endpoint, balance-validated
+# output). So run it ONCE, then deterministically match its values back onto
+# layout tokens — roles, formats, column orders, alignments and sign evidence
+# are derived from the MATCHED PRINTED TOKENS, never from the model's word.
+
+
+def llm_extraction_pass(pdf: Path) -> tuple[object | None, str]:
+    """One full LLM extraction (lenient best attempt) to seed hints.
+
+    Returns (StatementData | None, human-readable note). Any failure degrades
+    to "no hints" rather than aborting the drafting loop.
+    """
+    parser = Parser()  # env-configured: same TRANSTRACTOR_LLM_* as the harness
+    if parser.llm_config is None:
+        return None, "no LLM endpoint configured, skipped"
+    started = time.perf_counter()
+    try:
+        sd = parser.parse(str(pdf), lenient=True)
+    except Exception as error:  # noqa: BLE001 - the hint pass is best-effort
+        return None, f"failed ({type(error).__name__}: {str(error)[:120]})"
+    note = f"{len(sd.transactions)} transactions"
+    if sd.errors:
+        note += f", {len(sd.errors)} balance errors (lenient best attempt)"
+    return sd, f"{note} in {time.perf_counter() - started:.0f}s"
+
+
+def token_value(token: str) -> float | None:
+    """Signed numeric value a printed token represents, or None if it is not
+    an amount-shaped token. Intentionally LENIENT (ungrouped digits, missing
+    cents): this only decides whether a printed token carries a given value
+    for row matching — whether the ENGINE can parse it is a separate question
+    answered by engine_amount_format."""
+    text = token.strip()
+    if text.lower() == "nil":
+        return 0.0
+    if not re.search(r"\d", text):
+        return None
+    looks_money = re.match(r"(?i)^[-+]?\$?[\d,]+(?:\.\d+)?\s*(cr|dr)?$", text)
+    if not looks_money:
+        return None
+    negative = text.startswith("-") or text.endswith("-")
+    upper = text.upper()
+    if upper.endswith("DR"):
+        negative = True
+        text = text[:-2].rstrip()
+    elif upper.endswith("CR"):
+        text = text[:-2].rstrip()
+    text = text.strip().rstrip("-").strip()
+    sign = -1.0 if text[:1] == "-" else 1.0
+    text = text.lstrip("+-").replace("$", "").replace(",", "").replace(" ", "")
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return sign * (-value if negative else value)
+
+
+MONTH_WORDS = {
+    prefix: number
+    for number, name in enumerate(
+        [
+            "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november", "december",
+        ],
+        start=1,
+    )
+    for prefix in (name[:3],)
+}
+
+
+def token_date_candidates(token: str) -> list[tuple[int, int, int]]:
+    """(year, month, day) readings of a date-shaped token; year 0 when the
+    token itself prints no year. Numeric d/m orderings yield both readings."""
+    text = token.strip().rstrip(",")
+    if not any(re.match(pattern, text) for pattern in DATE_FORMAT_REGEXES.values()):
+        return []
+    words = re.findall(r"[A-Za-z]+|\d+", text)
+    alpha = [word for word in words if word.isalpha()]
+    nums = [int(word) for word in words if word.isdigit()]
+    readings: list[tuple[int, int, int]] = []
+    if alpha:
+        month = MONTH_WORDS.get(alpha[0].lower()[:3])
+        if month is None or not nums:
+            return []
+        year = nums[1] if len(nums) > 1 else 0
+        readings.append((year, month, nums[0]))
+    elif len(nums) >= 2:
+        year, first, second = 0, nums[0], nums[1]
+        if len(nums) == 3:
+            if nums[2] >= 100:
+                year, first, second = nums[2], nums[0], nums[1]
+            elif nums[0] >= 100:
+                year, first, second = nums[0], nums[1], nums[2]
+        readings.append((year, first, second))
+        if first != second:  # d/m vs m/d is ambiguous in print
+            readings.append((year, second, first))
+    return [
+        (y, m, d) for y, m, d in readings if 1 <= m <= 12 and 1 <= d <= 31
+    ]
+
+
+def extraction_hints(sd: object, layout_text: str) -> str:
+    """Deterministically back-match extracted values onto layout tokens.
+
+    For each extracted transaction, find the printed line whose tokens carry
+    the same amount (balance and date values confirm), then assign every
+    token on that line a role. Column orders, per-role formats, alignment
+    votes and Debit/Credit sign evidence all come from the matched tokens;
+    the model's numbers are only used to FIND the lines, never as data.
+    """
+    tokens = [
+        [(text, int(x1), int(x2)) for text, x1, x2, *_ in line]
+        for line in (
+            LAYOUT_ITEM_XY_RE.findall(line)
+            for line in layout_text.splitlines()
+            if line.startswith('["')
+        )
+    ]
+    values = [[token_value(text) for text, *_ in line] for line in tokens]
+    usable = [tx for tx in sd.transactions if abs(tx.amount) >= 0.005]
+
+    def date_consistent(text: str, tx: object) -> bool:
+        return any(
+            (y == 0 or y == tx.date.year) and m == tx.date.month and d == tx.date.day
+            for y, m, d in token_date_candidates(text)
+        )
+
+    def best_match(tx: object, start: int, used: set[int]) -> tuple[int, int, int] | None:
+        """(score, line index, amount token index) of the best candidate."""
+        best: tuple[int, int, int] | None = None
+        for line_index in range(start, len(tokens)):
+            if line_index in used:
+                continue
+            money = [i for i, v in enumerate(values[line_index]) if v is not None]
+            amount_at = [
+                i
+                for i in money
+                if abs(abs(values[line_index][i]) - abs(tx.amount)) < 0.005
+            ]
+            if not amount_at:
+                continue
+            score = 1
+            if abs(tx.balance) >= 0.005 and any(
+                abs(values[line_index][i] - tx.balance) < 0.005
+                for i in money
+                if i not in amount_at
+            ):
+                score += 2
+            if any(
+                date_consistent(tokens[line_index][i][0], tx)
+                for i in range(len(tokens[line_index]))
+            ):
+                score += 1
+            if best is None or score > best[0]:
+                best = (score, line_index, amount_at[0])
+        return best
+
+    # Bootstrap the table region with a strongly confirmed row (amount plus
+    # balance or date) so standalone amounts in the statement header cannot
+    # seed the matches.
+    table_start = 0
+    for tx in usable:
+        strong = best_match(tx, 0, set())
+        if strong and strong[0] >= 2:
+            table_start = strong[1]
+            break
+
+    headers = next(
+        (
+            [(text, x1, x2) for text, x1, x2 in line]
+            for line in tokens
+            if sum(1 for text, *_ in line if text in HEADER_WORDS) >= 2
+        ),
+        [],
+    )
+
+    def nearest_header(x1: int, x2: int) -> str | None:
+        if not headers:
+            return None
+        center = (x1 + x2) / 2
+        return min(headers, key=lambda h: abs((h[1] + h[2]) / 2 - center))[0]
+
+    def header_edge(word: str, edge: int) -> int | None:
+        return next(
+            (h[edge] for h in headers if h[0] == word), None
+        )
+
+    orders: dict[tuple[str, ...], list[str]] = {}
+    role_formats: dict[str, dict[str, set[str]]] = {
+        "amount": {}, "balance": {}, "date": {}
+    }
+    unparseable_roles: dict[str, set[str]] = {}
+    votes = {"amount": [0, 0], "balance": [0, 0]}  # [x1, x2] edge votes
+    flip_xs: list[tuple[int, int]] = []  # negative amounts printed unsigned
+    credit_xs: list[tuple[int, int]] = []
+    samples: list[str] = []
+    used: set[int] = set()
+    matched = 0
+
+    for tx in usable:
+        found = best_match(tx, table_start, used)
+        if found is None:
+            continue
+        _, line_index, amount_i = found
+        used.add(line_index)
+        line = tokens[line_index]
+        balance_i = None
+        if abs(tx.balance) >= 0.005:
+            for i, value in enumerate(values[line_index]):
+                if i != amount_i and value is not None and abs(value - tx.balance) < 0.005:
+                    balance_i = i
+                    break
+        date_i = None
+        for i, (text, *_rest) in enumerate(line):
+            if i not in (amount_i, balance_i) and date_consistent(text, tx):
+                date_i = i
+                break
+
+        columns: list[str] = []
+        annotated: list[str] = []
+        for i, (text, _x1, _x2) in enumerate(line):
+            if i == amount_i:
+                column = "amount"
+            elif i == balance_i:
+                column = "balance"
+            elif i == date_i:
+                column = "date"
+            else:
+                column = "description"
+            if column == "description" and columns and columns[-1] == "description":
+                pass
+            else:
+                columns.append(column)
+            annotated.append(f"{column}:'{text}'")
+        orders.setdefault(tuple(columns), []).append(" ".join(t for t, *_ in line)[:60])
+        if len(samples) < 8:
+            samples.append("  " + "  ".join(annotated))
+        matched += 1
+
+        # Word-level classification (the engine's own view of the line).
+        words = line_words([text for text, *_ in line])
+        word_offsets: list[int] = []
+        position = 0
+        for text, *_rest in line:
+            word_offsets.append(position)
+            position += len(text.split())
+
+        def item_format(item_index: int) -> str | None:
+            start = word_offsets[item_index]
+            end = start + len(line[item_index][0].split())
+            for word_index in range(start, end):
+                name = engine_amount_format(words, word_index)
+                if name is not None:
+                    return name
+            return None
+
+        for role, index in (("amount", amount_i), ("balance", balance_i)):
+            if index is None:
+                continue
+            text, x1, x2 = line[index]
+            name = item_format(index)
+            if name is not None:
+                role_formats[role].setdefault(name, set()).add(text.strip())
+            else:
+                # Money-shaped but no engine format can parse it (missing
+                # grouping/cents): the config must route around this
+                # column, so say so explicitly.
+                unparseable_roles.setdefault(role, set()).add(text.strip())
+            word = nearest_header(x1, x2)
+            if word is not None:
+                if abs(x1 - (header_edge(word, 1) or x1 + 99)) <= 10:
+                    votes[role][0] += 1
+                if abs(x2 - (header_edge(word, 2) or x2 + 99)) <= 10:
+                    votes[role][1] += 1
+            if role == "amount":
+                value = values[line_index][index]
+                if value is not None:
+                    if tx.amount < 0 <= value:
+                        flip_xs.append((x1, x2))
+                    elif tx.amount > 0:
+                        credit_xs.append((x1, x2))
+        if date_i is not None:
+            text = line[date_i][0]
+            for name, pattern in DATE_FORMAT_REGEXES.items():
+                if re.match(pattern, text.strip()):
+                    role_formats["date"].setdefault(name, set()).add(text.strip())
+
+    if not matched:
+        return ""
+
+    def anchor_line(value: float, label: str) -> str:
+        hits = [
+            (j, " ".join(text for text, *_ in tokens[j]))
+            for j in range(len(tokens))
+            if any(v is not None and abs(v - value) < 0.005 for v in values[j])
+        ]
+        if not hits:
+            return ""
+        line_index, line_text = (
+            hits[0]
+            if table_start == 0
+            else next(((j, text) for j, text in hits if j < table_start), hits[0])
+        )
+        # Non-numeric words on the line are the label the config must name.
+        words = " ".join(
+            text for text, *_ in tokens[line_index] if token_value(text) is None
+        )[:60]
+        return (
+            f"- {label} {value:.2f} printed on: {line_text[:80]!r} "
+            f"-> {label.replace(' ', '_')}_terms candidate: {words!r}"
+        )
+
+    parts = [
+        f"LLM extraction pass matched {matched} of {len(usable)} extracted "
+        "transactions onto printed layout lines (roles below were assigned by "
+        "value matching, not by the model):",
+        *samples,
+        "Column orders seen on matched lines (declare ALL in transaction_formats):",
+    ]
+    for order, order_samples in sorted(orders.items(), key=lambda kv: -len(kv[1])):
+        quoted = "[" + ", ".join(f'"{c}"' for c in order) + "]"
+        continuation = " (no date — continuation row)" if "date" not in order else ""
+        parts.append(f"- {quoted} x {len(order_samples)}{continuation}, e.g. {order_samples[0]}")
+    for role, field in (
+        ("amount", "transaction_amount_formats"),
+        ("balance", "transaction_balance_formats"),
+        ("date", "transaction_date_formats"),
+    ):
+        matches = role_formats[role]
+        if matches:
+            best = max(matches.items(), key=lambda kv: len(kv[1]))
+            examples = ", ".join(f"'{s}'" for s in sorted(best[1])[:3])
+            parts.append(f"- {field}: {best[0]} ({examples})")
+    for role, action in (
+        ("balance", "Declare transaction_formats WITHOUT the balance column — the "
+         "engine derives the running balance itself and the balance checkers "
+         "still verify every number."),
+        ("amount", "No config can read an amount column the engine has no format "
+         "for; if these are really the amounts, the rules engine cannot parse "
+         "this table at all."),
+    ):
+        tokens_bad = unparseable_roles.get(role)
+        if tokens_bad:
+            examples = ", ".join(f"'{s}'" for s in sorted(tokens_bad)[:3])
+            parts.append(
+                f"- WARNING: printed {role} tokens ({examples}) match NO engine "
+                f"amount format. {action}"
+            )
+    for role in ("amount", "balance"):
+        x1_votes, x2_votes = votes[role]
+        if x1_votes or x2_votes:
+            edge = "x2" if x2_votes >= x1_votes else "x1"
+            parts.append(
+                f"- transaction_{role}_alignment: {edge} (x2 votes {x2_votes} vs "
+                f"x1 votes {x1_votes} among matched tokens vs their column header)"
+            )
+    if flip_xs:
+        debit_span = (min(x1 for x1, _ in flip_xs), max(x2 for _, x2 in flip_xs))
+        debit_header = nearest_header(*debit_span)
+        credit_header = None
+        if credit_xs:
+            credit_span = (min(x1 for x1, _ in credit_xs), max(x2 for _, x2 in credit_xs))
+            credit_header = nearest_header(*credit_span)
+        parts.append(
+            f"- SIGN EVIDENCE: {len(flip_xs)} rows have NEGATIVE extracted amounts "
+            f"whose printed token is UNSIGNED at x {debit_span[0]}-{debit_span[1]}"
+            + (f" (header '{debit_header}')" if debit_header else "")
+            + (
+                f" while positive amounts sit at x {credit_span[0]}-{credit_span[1]}"
+                f" (header '{credit_header}')"
+                if credit_xs
+                else ""
+            )
+            + ". That is a separate Debit/Credit column pair: model it as ONE "
+            'amount column with "transaction_amount_headers": ['
+            + (f"'{credit_header}'" if credit_header else "the credit column header")
+            + '], "transaction_amount_invert_headers": ['
+            + (f"'{debit_header}'" if debit_header else "the debit column header")
+            + '], "transaction_amount_invert_alignment": "x2".'
+        )
+    for value, label in (
+        (sd.opening_balance, "opening balance"),
+        (sd.closing_balance, "closing balance"),
+    ):
+        if abs(value) >= 0.005:
+            anchor = anchor_line(value, label)
+            if anchor:
+                parts.append(anchor)
+    unmatched = len(usable) - matched
+    if unmatched:
+        parts.append(
+            f"- {unmatched} extracted transactions matched NO printed line "
+            "(hallucinations or amounts printed inside wrapped description rows) "
+            "— do not invent config for them."
+        )
+    return "\n".join(parts)[:3500]
+
+
 # --- The loop ----------------------------------------------------------------
 
 
-def draft_config(pdfs: list[Path], rounds: int) -> tuple[dict | None, bool, list[dict]]:
+def draft_config(
+    pdfs: list[Path], rounds: int, use_extraction_hint: bool = True
+) -> tuple[dict | None, bool, list[dict]]:
     """Returns (best config or None, verified?, round history)."""
+    layouts = {pdf: layout_dump(pdf) for pdf in pdfs}
     observations = "\n\n".join(
-        f"--- Statement: {pdf.name} ---\n{layout_dump(pdf)}" for pdf in pdfs
+        f"--- Statement: {pdf.name} ---\n{layouts[pdf]}" for pdf in pdfs
     )
+    hint = ""
+    if use_extraction_hint:
+        sd, note = llm_extraction_pass(pdfs[0])
+        print(f"extraction hint pass: {note}")
+        if sd is not None and sd.transactions:
+            hint = extraction_hints(sd, layouts[pdfs[0]])
     suggestions = format_suggestions(observations)
     if suggestions:
         observations += (
@@ -637,6 +1138,13 @@ def draft_config(pdfs: list[Path], rounds: int) -> tuple[dict | None, bool, list
     shapes = table_shape_analysis(observations)
     if shapes:
         observations += f"\n\n{shapes}"
+    if hint:
+        observations += (
+            "\n\nAn UNVERIFIED LLM extraction pass was matched back onto the "
+            "layout tokens above; the roles/formats/alignments below were "
+            "DERIVED from the matched printed tokens (the extraction's own "
+            f"numbers are not data):\n{hint}"
+        )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Layout dumps:\n{observations}\n\nWrite the configuration."},
@@ -711,6 +1219,8 @@ def draft_config(pdfs: list[Path], rounds: int) -> tuple[dict | None, bool, list
             # The model parroted its previous answer in the long conversation.
             # Escalate: reset to a short, direct instruction with the specific
             # fix named — small models comply with direct edits, not essays.
+            # The extraction-derived evidence stays pinned: a fresh context
+            # must not lose the strongest signal about the real table shape.
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -718,7 +1228,13 @@ def draft_config(pdfs: list[Path], rounds: int) -> tuple[dict | None, bool, list
                     "content": (
                         "This configuration failed to parse the statement:\n"
                         f"{json.dumps(config_json)}\n\nDiagnosis: "
-                        f"{feedback[-1200:]}\n\nApply the named fixes and return the "
+                        f"{feedback[-1200:]}\n\n"
+                        + (
+                            f"Verified evidence from the extraction pass:\n{hint[:1600]}\n\n"
+                            if hint
+                            else ""
+                        )
+                        + "Apply the named fixes and return the "
                         "complete corrected configuration JSON. Every column MUST have "
                         'an alignment: "transaction_date_alignment": "x1", '
                         '"transaction_description_alignment": "x1", '
@@ -743,10 +1259,18 @@ def main() -> int:
         help=f"correction turns for the drafting loop (default {ROUNDS}, from "
         "TRANSTRACTOR_LLM_ROUNDS or .env)",
     )
+    cli.add_argument(
+        "--no-extraction-hint",
+        action="store_true",
+        help="skip the round-0 LLM extraction pass used to derive table hints "
+        "(run it when the drafting loop fails to converge from layout alone)",
+    )
     args = cli.parse_args()
 
     print(f"config harness: {len(args.pdfs)} statement(s), {MODEL} at {BASE_URL}")
-    config, verified, history = draft_config(args.pdfs, args.rounds)
+    config, verified, history = draft_config(
+        args.pdfs, args.rounds, use_extraction_hint=not args.no_extraction_hint
+    )
     if config is None:
         print("\nFAILED: no configuration parsed any statement cleanly.")
         print(json.dumps(history, indent=2))
