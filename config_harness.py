@@ -389,11 +389,13 @@ def evaluate(config_json: dict, pdfs: list[Path]) -> dict:
                 {"pdf": pdf.name, "ok": True, "txns": len(sd.transactions)}
             )
         except ParseError as error:
-            # Extract how far the engine got: rows + first checker error.
-            excerpt = debug_excerpt(pdf, config_json)
-            rows = len(re.findall(r"^\s+\d+: ", excerpt, re.M))
+            # Extract how far the engine got from the FULL debug report:
+            # row count and the engine's own error list (which lives at the
+            # END of the output, after every proto row).
+            full_report = debug_report(config_json, pdf)
+            rows = len(re.findall(r"^\s+\d+: ", full_report, re.M))
             first_error = next(
-                (line[5:] for line in excerpt.splitlines() if line.startswith("    - ")),
+                (line[5:] for line in full_report.splitlines() if line.startswith("    - ")),
                 str(error)[:120],
             )
             results.append(
@@ -426,19 +428,55 @@ def evaluate(config_json: dict, pdfs: list[Path]) -> dict:
     }
 
 
-def debug_excerpt(pdf: Path, config_json: dict, limit: int = 2200) -> str:
-    """Per-config parse attempt details for a recognised-but-failing config."""
+def debug_report(config_json: dict, pdf: Path) -> str:
+    """Full engine debug output for a recognised-but-failing config.
+
+    Returns "" when unavailable; engine panics (pyo3 PanicException) are
+    contained here so a drafting round degrades to less feedback instead of
+    killing the process.
+    """
     parser = Parser()
-    parser.load_str(json.dumps(config_json))
+    try:
+        parser.load_str(json.dumps(config_json))
+    except ConfigLoadError:
+        return ""
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tmp:
         debug_path = tmp.name
     try:
         parser.debug(str(pdf), debug_path)
-        return Path(debug_path).read_text()[:limit]
+        return Path(debug_path).read_text()
     except ParseError:
+        return ""
+    except Exception:  # noqa: BLE001 - engine panics etc. degrade gracefully
         return ""
     finally:
         Path(debug_path).unlink(missing_ok=True)
+
+
+def debug_excerpt(pdf: Path, config_json: dict, limit: int = 2400) -> str:
+    """Compact excerpt that ALWAYS includes the engine's Errors section.
+
+    The raw debug output lists every proto row before the errors, so a plain
+    head-truncation hides exactly the part the model must see. This keeps the
+    statement header, a row sample, and the complete error list.
+    """
+    text = debug_report(config_json, pdf)
+    if not text:
+        return ""
+    errors_block = ""
+    if match := re.search(r"  Errors:\n(?:    - .*\n?)+", text):
+        errors_block = match.group(0).rstrip()
+    proto_rows = [line.strip() for line in text.splitlines() if re.match(r"^\s+\d+: ", line)]
+    header = text.split("  Proto Transactions:")[0].strip()
+    more = f"({len(proto_rows) - 12} more rows truncated)" if len(proto_rows) > 12 else ""
+    parts = [
+        header,
+        "Proto Transactions (first 12):",
+        *proto_rows[:12],
+        more,
+        errors_block,
+    ]
+    return "\n".join(part for part in parts if part)[:limit]
 
 
 def table_diagnostics_excerpt(pdf: Path, config_json: dict, limit: int = 2400) -> str:
