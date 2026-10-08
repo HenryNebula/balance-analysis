@@ -13,3 +13,8 @@ dependencies = [
 
 [tool.uv.sources]
 transtractor = { path = "transtractor" }
+
+[dependency-groups]
+dev = [
+    "pikepdf>=10.16.0",
+]
