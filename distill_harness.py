@@ -402,12 +402,23 @@ def lint_code(code: str) -> str | None:
 
 
 def _child_limits() -> None:
+    """Best-effort rlimits for the sandboxed child. Each is applied
+    independently and skipped where the platform refuses it — macOS rejects
+    RLIMIT_AS outright and low NOFILE ceilings below its default soft limit.
+    An exception in preexec_fn would kill subprocess.run with a detail-free
+    SubprocessError, so nothing here may raise."""
     import resource
 
-    resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
-    resource.setrlimit(resource.RLIMIT_AS, (512 << 20, 512 << 20))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (8 << 20, 8 << 20))
-    resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+    for limit, value in (
+        (resource.RLIMIT_CPU, (30, 30)),
+        (resource.RLIMIT_FSIZE, (8 << 20, 8 << 20)),
+        (resource.RLIMIT_AS, (512 << 20, 512 << 20)),
+        (resource.RLIMIT_NOFILE, (64, 64)),
+    ):
+        try:
+            resource.setrlimit(limit, value)
+        except (ValueError, OSError):
+            pass
 
 
 def network_prefix() -> list[str]:
