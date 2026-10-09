@@ -3,19 +3,36 @@
 <div class="banner banner-probe">
   <strong>Probe — every parser, nothing saved</strong>
   {% if note %}<div>{{ note }}</div>{% endif %}
+  {% if verified %}
   <table class="table table-tight">
-    <thead><tr><th>Parser</th><th>Verdict</th><th class="num">Rows</th><th>Detail</th></tr></thead>
+    <thead><tr><th>Parser</th><th>Verdict</th><th class="num">Rows</th></tr></thead>
     <tbody>
-      {% for row in results %}
+      {% for row in results if row.ok %}
       <tr>
         <td class="mono">{{ row.key }}</td>
-        <td>{% if row.ok %}<span class="chip chip-ok">✓ verifies</span>{% else %}<span class="chip chip-fail">✗</span>{% endif %}</td>
+        <td><span class="chip chip-ok">✓ verifies</span></td>
         <td class="num">{{ row.rows or '—' }}</td>
-        <td>{{ row.error }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  {% else %}
+  <div class="text-muted">No parser matches — this bank needs a new one (distill run).</div>
+  {% endif %}
+  {% set non_matches = results | rejectattr('ok') | list %}
+  {% if non_matches %}
+  <details class="diag">
+    <summary>diagnostics — {{ non_matches|length }} parsers don't match</summary>
+    <table class="table table-tight">
+      <thead><tr><th>Parser</th><th>Why it didn't match</th></tr></thead>
+      <tbody>
+        {% for row in non_matches %}
+        <tr><td class="mono">{{ row.key }}</td><td class="text-muted">{{ row.error }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
   {% if suggested %}
   <div class="banner-action">
     Found this bank's parser. Pin it?
@@ -34,7 +51,5 @@
     </form>
     {% endfor %}
   </div>
-  {% else %}
-  <div class="text-muted">No parser verifies — this bank needs a new one (distill run).</div>
   {% endif %}
 </div>

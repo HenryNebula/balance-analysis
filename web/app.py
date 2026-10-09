@@ -132,7 +132,8 @@ def create_app(data_root: Path | None = None,
                max_mb: float | None = None,
                harness_script: Path | None = None) -> FastAPI:
     """harness_script: run this canned script instead of the LLM loop — the
-    test seam for the whole runs pipeline (no LLM, real subprocess)."""
+    test seam for the whole runs pipeline (no LLM, real subprocess). Also
+    settable via STMTLEDGER_WEB_HARNESS_SCRIPT for dev/browser testing."""
     store = Store(Path(data_root or os.environ.get("STMTLEDGER_WEB_DATA",
                                                    "data")))
     # Parsers distilled at runtime are USER DATA: the overlay lives in the
@@ -145,7 +146,10 @@ def create_app(data_root: Path | None = None,
                                                     MAX_MB_DEFAULT)))
                     * 1024 * 1024)
     repo_root = Path(__file__).resolve().parents[1]
-    runs = RunManager(store, repo_root, harness_script=harness_script)
+    env_script = os.environ.get("STMTLEDGER_WEB_HARNESS_SCRIPT")
+    runs = RunManager(store, repo_root,
+                      harness_script=harness_script
+                      or (Path(env_script) if env_script else None))
 
     from contextlib import asynccontextmanager
 
@@ -645,6 +649,7 @@ def create_app(data_root: Path | None = None,
         ids = payload.get("statement_ids") or []
         if isinstance(ids, str):
             ids = [part.strip() for part in ids.split(",") if part.strip()]
+        ids = [entry for entry in ids if isinstance(entry, str) and entry]
         mode = str(payload.get("mode") or "draft")
         key = str(payload.get("key") or "").strip() or None
         if mode == "maintain" and not key and account.get("registry_key"):

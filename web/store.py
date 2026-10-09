@@ -124,7 +124,7 @@ class Store:
         return self._account_dir(slug) / "statements"
 
     def _statement_dir(self, slug: str, sid: str) -> Path:
-        if not re.match(r"^[0-9a-f]{16}$", sid):
+        if not isinstance(sid, str) or not re.match(r"^[0-9a-f]{16}$", sid):
             raise ValueError(f"bad statement id {sid!r}")
         return self._statements_root(slug) / sid
 

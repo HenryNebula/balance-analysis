@@ -95,16 +95,23 @@
       (selection.label || (selection.line_ids.length + " lines"));
   }
 
-  function scrub(round) {
+  // selectRound: mark + refresh panes. scrub: the MANUAL version, which
+  // additionally unpins auto-follow. Auto-follow must call selectRound —
+  // calling scrub from follow unpinned itself after the first round.
+  function selectRound(round) {
     scrubbedRound = round;
-    follow = false;
-    followDot.classList.remove("active");
     document.querySelectorAll(".tl-round").forEach(function (row) {
       row.classList.toggle(
         "selected", Number(row.getAttribute("data-round")) === round);
     });
     renderOverlay(lastSelection[round]);
     loadCode(round);
+  }
+
+  function scrub(round) {
+    follow = false;
+    followDot.classList.remove("active");
+    selectRound(round);
   }
 
   // -- timeline ------------------------------------------------------------
@@ -174,7 +181,10 @@
         addBadge(number, event.kind === "probe" ? "probe" : "script",
                  event.kind === "probe" ? "chip-key" : "chip-muted");
         addBadge(number, "running…", "chip-muted tl-running");
-        if (follow) { scrub(number); }
+        if (follow) {
+          selectRound(number);
+          timeline.scrollTop = timeline.scrollHeight;
+        }
         break;
       case "round_ran":
         roundRow(number);

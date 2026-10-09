@@ -22,14 +22,23 @@
 {% elif ledger %}
 <div class="banner banner-fail"><strong>✗ Does not reconcile</strong> — the stored ledger fails the arithmetic gate (parser or statement changed since parsing). Re-parse.</div>
 {% elif meta.status == 'failed' %}
-<div class="banner banner-fail">
-  <strong>✗ No parser verified this statement.</strong>
+<div class="banner {{ 'banner-fail' if account.registry_key else 'banner-warn' }}">
+  {% if account.registry_key %}
+    <strong>✗ The pinned parser did not verify this statement.</strong>
+    <div class="text-muted">The bank may have changed its layout. Attempts are in
+      <a href="#parse-history">Parse history</a> below — re-detect (try all parsers),
+      or evolve the parser with a maintain run.</div>
+  {% else %}
+    <strong>◇ No parser for this bank yet.</strong>
+    <div class="text-muted">The normal first step for a new bank. Register a parser once —
+      <a href="#parse-history">Parse history</a> below has the per-parser diagnostics.</div>
+  {% endif %}
   {% set last = meta.history[-1] if meta.history else None %}
-  {% if last and last.note %}{{ last.note }}{% endif %}
-  Per-parser attempts are in <a href="#parse-history">Parse history</a> below —
-  register a parser for this bank with the distill harness:
-  <pre>$ uv run python tools/distill_harness.py {{ pdf_rel }} --max-probes 8</pre>
-  (needs STATEMENTLEDGER_LLM_* in .env — see .env.example)
+  {% if last and last.note %}<div class="text-muted">{{ last.note }}</div>{% endif %}
+  <div class="cli">
+    <div>…or from the shell (needs STATEMENTLEDGER_LLM_* in .env — see .env.example):</div>
+    <pre>$ uv run python tools/distill_harness.py {{ pdf_rel }} --max-probes 8</pre>
+  </div>
 </div>
 {% else %}
 <div class="banner">◻ Unparsed.</div>

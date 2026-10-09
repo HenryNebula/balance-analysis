@@ -89,6 +89,8 @@
       <td class="td-actions">
         {% if run.status in ('running', 'cancelling') %}
         <a class="btn btn-small" href="/runs/{{ run.id }}">watch live</a>
+        <button class="btn btn-small btn-danger" title="stop this run (SIGTERM; the LLM loop cannot pause)"
+                hx-delete="/runs/{{ run.id }}" hx-confirm="Cancel this run?">cancel</button>
         {% else %}
         <a class="btn btn-small" href="/runs/{{ run.id }}">view</a>
         {% endif %}

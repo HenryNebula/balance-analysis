@@ -191,7 +191,7 @@ def test_statement_404s(client):
 def test_reparse_after_repin(client):
     create(client, "Blue Lantern Savings", key=COPPER_KEY)
     sid = upload(client, "blue-lantern-savings", BLUE).json()["id"]
-    assert "no parser verified" in client.get(
+    assert "pinned parser did not verify" in client.get(
         f"/accounts/blue-lantern-savings/statements/{sid}").text.lower()
     # pin the right parser, then re-parse the stored PDF
     pinned = client.post("/accounts/blue-lantern-savings/key",

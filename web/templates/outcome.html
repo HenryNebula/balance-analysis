@@ -31,30 +31,45 @@
 </div>
 
 {% elif outcome.kind == 'failed' %}
-<div class="banner banner-fail">
-  <strong>✗ {% if outcome.pinned %}The pinned parser did not verify this statement{% else %}No registered parser verified {{ outcome.statement.original_filename }}{% endif %}</strong>
-  {% if outcome.note %}<div>{{ outcome.note }}</div>{% endif %}
-  {% if outcome.attempts %}
-  <table class="table table-tight">
-    <thead><tr><th>Parser</th><th>Why it failed the gate</th></tr></thead>
-    <tbody>
-      {% for a in outcome.attempts %}
-      <tr><td class="mono">{{ a.key }}</td><td>{{ a.error }}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<div class="banner {{ 'banner-fail' if outcome.pinned else 'banner-warn' }}">
+  {% if outcome.pinned %}
+    <strong>✗ The pinned parser did not verify this statement</strong>
+    <div class="text-muted">The bank may have changed its layout — re-detect, or evolve the parser with a maintain run.</div>
+    {% if outcome.attempts %}
+    <table class="table table-tight">
+      <thead><tr><th>Parser</th><th>Why it failed the gate</th></tr></thead>
+      <tbody>
+        {% for a in outcome.attempts %}
+        <tr><td class="mono">{{ a.key }}</td><td>{{ a.error }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  {% else %}
+    <strong>◇ No parser for this bank yet — that's the normal first step</strong>
+    <div class="text-muted">The PDF is stored and ready. Register a parser once and every future
+      statement from this bank parses with zero LLM.</div>
+    {% if outcome.note %}<div class="text-muted">{{ outcome.note }}</div>{% endif %}
+    {% if outcome.attempts %}
+    <details class="diag">
+      <summary>diagnostics — {{ outcome.attempts|length }} parsers tried, none matched</summary>
+      <table class="table table-tight">
+        <thead><tr><th>Parser</th><th>Why it didn't match</th></tr></thead>
+        <tbody>
+          {% for a in outcome.attempts %}
+          <tr><td class="mono">{{ a.key }}</td><td class="text-muted">{{ a.error }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+    {% endif %}
   {% endif %}
-  <div class="text-muted">The PDF is stored; nothing was parsed.</div>
-  <div class="cli">
-    <div>Register a new parser with the distill harness (needs STATEMENTLEDGER_LLM_* in .env — see .env.example):</div>
-    <pre>$ uv run python tools/distill_harness.py {{ outcome.pdf_rel }} --max-probes 8</pre>
-  </div>
   <div class="banner-action">
+    {% with sid = outcome.statement.id %}{% include "launch_dialog.html" %}{% endwith %}
     <button class="btn btn-small" title="try every parser again — new ones are picked up live"
             hx-post="/accounts/{{ account.slug }}/probe"
             hx-vals='{"statement_id": "{{ outcome.statement.id }}"}'
             hx-target="next .probe-slot">try all parsers</button>
-    {% with sid = outcome.statement.id %}{% include "launch_dialog.html" %}{% endwith %}
     <a class="btn btn-small" href="/accounts/{{ account.slug }}/statements/{{ outcome.statement.id }}">view</a>
   </div>
   <div class="probe-slot"></div>

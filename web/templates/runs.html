@@ -5,7 +5,7 @@
 <p class="page-sub">One active run at a time (bounded LLM spend). Runs are
 minutes-long and cost money; cancel is always one click away in the run view.</p>
 <table class="table">
-  <thead><tr><th>Run</th><th>Account</th><th>Mode</th><th>Status</th><th>Started</th><th>Duration</th><th>Parser</th></tr></thead>
+  <thead><tr><th>Run</th><th>Account</th><th>Mode</th><th>Status</th><th>Started</th><th>Duration</th><th>Parser</th><th class="th-actions">Actions</th></tr></thead>
   <tbody>
     {% for run in runs %}
     <tr>
@@ -23,9 +23,15 @@ minutes-long and cost money; cancel is always one click away in the run view.</p
       <td>{{ run.created_at|dt }}</td>
       <td class="num">{{ run.duration or '—' }}</td>
       <td class="mono">{{ run.converged_key or '—' }}</td>
+      <td class="td-actions">
+        {% if run.status in ('running', 'cancelling') %}
+        <button class="btn btn-small btn-danger" title="stop this run (SIGTERM; the LLM loop cannot pause)"
+                hx-delete="/runs/{{ run.id }}" hx-confirm="Cancel this run?">cancel</button>
+        {% endif %}
+      </td>
     </tr>
     {% else %}
-    <tr><td colspan="7" class="empty">No runs — launch one from a failed statement.</td></tr>
+    <tr><td colspan="8" class="empty">No runs — launch one from a failed statement.</td></tr>
     {% endfor %}
   </tbody>
 </table>

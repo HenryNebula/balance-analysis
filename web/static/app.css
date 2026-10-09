@@ -84,6 +84,18 @@ a { color: var(--accent); }
 .hint { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
 .req { color: var(--fail); font-weight: 600; }
 
+/* collapsed diagnostics: the honest detail, without the alarm */
+.diag { margin-top: 8px; }
+.diag summary {
+  cursor: pointer; color: var(--ink-soft); font-size: 12.5px;
+  list-style: none; width: max-content;
+}
+.diag summary::-webkit-details-marker { display: none; }
+.diag summary::before { content: "▸ "; }
+.diag[open] summary::before { content: "▾ "; }
+.diag summary:hover { color: var(--ink); }
+.diag table { margin-top: 6px; }
+
 /* danger zone */
 .danger-zone summary { list-style: none; width: max-content; }
 .danger-zone[open] .card {
