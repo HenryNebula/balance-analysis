@@ -108,6 +108,12 @@ Rules of the artifact:
 - It must generalize across months of THIS bank: derive columns from each
   statement's own header row and stop terms from the words it prints; never
   hardcode one month's geometry or contents.
+- Presentation semantics: a date-less row inherits the previous row's date;
+  a balance-less row gets the running computed balance (start from opening,
+  add each amount in order, ROUNDING TO 2 DECIMALS after every step — money
+  is exactly 2dp, never 17800.230000000003). Never leave None where the
+  statement's own arithmetic supplies the value — downstream consumers want
+  a complete ledger, not holes the printer happened to leave.
 
 Sandbox environment (import and go):
 - import statementledger as pl
@@ -1104,14 +1110,36 @@ def main() -> int:
         trace.log("maintenance diff", "\n".join(diff[:80]))
     if args.no_save:
         print(f"\nVERIFIED (not saved, --no-save); parser drafted in {workdir}")
-    else:
-        REGISTRY.mkdir(exist_ok=True)
-        out_path = REGISTRY / f"{key}.py"
-        out_path.write_text(artifact["code"])
-        print(f"\nVERIFIED parser saved: {out_path}")
-        print("Reuse with zero LLM:")
-        print(f"  uv run statementledger statement.pdf --key {key}")
-        trace.log("result", f"VERIFIED parser saved: {out_path}")
+        trace.log("result", f"VERIFIED (not saved); parser drafted in {workdir}")
+        # nothing is registered, so the reuse demo runs the drafted module
+        # straight from the workdir
+        import importlib.util
+
+        draft = workdir / "verified.py"
+        draft.write_text(artifact["code"])
+        spec = importlib.util.spec_from_file_location("verified_draft", draft)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        frames = frames_for(args.pdfs, workdir)["statements"]
+        for pdf, stmt_frames in zip(args.pdfs, frames):
+            stmt = module.parse(stmt_frames)
+            line = (
+                f"  {pdf.name}: {len(stmt['transactions'])} transactions, "
+                f"opening {stmt['opening_balance']:,.2f} -> "
+                f"closing {stmt['closing_balance']:,.2f}"
+            )
+            print(line)
+            trace.line(line)
+        trace.close()
+        return 0
+
+    REGISTRY.mkdir(exist_ok=True)
+    out_path = REGISTRY / f"{key}.py"
+    out_path.write_text(artifact["code"])
+    print(f"\nVERIFIED parser saved: {out_path}")
+    print("Reuse with zero LLM:")
+    print(f"  uv run statementledger statement.pdf --key {key}")
+    trace.log("result", f"VERIFIED parser saved: {out_path}")
 
     for pdf in args.pdfs:
         stmt = statementledger.parse(str(pdf), key=key)
