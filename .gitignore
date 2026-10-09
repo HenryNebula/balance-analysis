@@ -25,6 +25,10 @@ ab_report.json
 # Per-run harness traces (contain statement text)
 logs/
 
+# Downloaded test datasets + web UI account storage (statements, parsed ledgers)
+# Real statements and some test corpora carry real PII — keep it all local.
+data/
+
 # uv project cache dirs created on some machines
 .uv/
 
