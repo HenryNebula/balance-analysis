@@ -346,6 +346,23 @@ def validate(stmt) -> list[str]:
             "table region is right (the stop term must be the words printed "
             "AFTER the last transaction), and (c) amount cells parse "
             "(pl.parse_amount returns None for unreadable tokens)"]
+    totals = stmt.get("totals", [])
+    if totals is not None:
+        if not isinstance(totals, list):
+            errors.append('totals must be a list of {"label", "kind", '
+                          '"value"} checks or absent')
+        else:
+            for index, total in enumerate(totals):
+                if (not isinstance(total, dict)
+                        or not isinstance(total.get("label"), str)
+                        or total.get("kind") not in TOTAL_KINDS
+                        or not isinstance(total.get("value"), (int, float))):
+                    errors.append(
+                        f"totals[{index}] must be a dict {{label: str, kind: "
+                        f"'positive'|'negative'|'all', value: number}} — the "
+                        "printed section totals the statement itself states "
+                        "(e.g. 'Total deposits and other additions'), bound "
+                        "with pl.parse_amount at runtime")
 
     def where(index: int, txn: dict) -> str:
         label = txn.get("description") or txn.get("date") or ""
@@ -409,10 +426,14 @@ def _crash_hint(error: BaseException) -> str:
     return ""
 
 
+TOTAL_KINDS = ("positive", "negative", "all")
+
+
 def reconcile_statement(stmt: dict, tol: float = TOL) -> str | None:
     """Ledger check on a parsed statement: None when it reconciles, else the
-    first divergence (closing drift, or the row whose printed balance breaks
-    the running sum). Interpreting the message:
+    first divergence (closing drift, the row whose printed balance breaks
+    the running sum, or a printed section total that misses its parsed sum).
+    Interpreting the message:
     - one row diverges, the rest track -> that row's sign or column binding
       is wrong (credit/debit swapped, or an amount binned to the wrong
       column)
@@ -420,6 +441,10 @@ def reconcile_statement(stmt: dict, tol: float = TOL) -> str | None:
       counted: check the stop term and description-wrap merging
     - everything diverges from row 0 -> opening_balance is wrong (the anchor
       label or its token)
+    - a totals[...] check fails while end-to-end passes -> a dropped
+      offsetting PAIR, a double sign flip, or amounts reconstructed from
+      the balance chain instead of read from the amount column — errors
+      end-to-end reconcile mathematically cannot see
     """
     errors = validate(stmt)
     if errors:
@@ -439,6 +464,21 @@ def reconcile_statement(stmt: dict, tol: float = TOL) -> str | None:
                 f"closing printed {stmt['closing_balance']:,.2f} "
                 f"(drift {drift:+,.2f}; suspect a dropped or duplicated row, "
                 "a wrong sign, or a mis-binned column)")
+    amounts = [float(t["amount"]) for t in stmt["transactions"]]
+    sums = {
+        "positive": sum(a for a in amounts if a > 0),
+        "negative": sum(-a for a in amounts if a < 0),
+        "all": sum(amounts),
+    }
+    for total in stmt.get("totals", []):
+        expected = sums[total["kind"]]
+        if abs(expected - float(total["value"])) > tol:
+            return (f"totals check {total['label']!r}: parsed "
+                    f"{total['kind']} amounts sum to {expected:,.2f} but the "
+                    f"statement prints {float(total['value']):,.2f} (drift "
+                    f"{expected - float(total['value']):+,.2f}; suspect a "
+                    "dropped offsetting pair, a double sign flip, or amounts "
+                    "derived from balances instead of the amount column)")
     return None
 
 

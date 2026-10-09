@@ -400,6 +400,15 @@ Your deliverable — a complete parser module. Nothing else persists:
                  "amount": float,                # SIGNED: credits +, debits -
                  "balance": float or None},      # printed running balance, if any
             ],
+            # OPTIONAL, but bind it when the statement prints section totals
+            # ("Total deposits and other additions", "Total withdrawals ...").
+            # Each total is an INDEPENDENT accuracy check — kind "positive"
+            # matches Σ positive amounts, "negative" matches Σ |debits|, "all"
+            # matches the plain sum:
+            "totals": [
+                {"label": "Total deposits and other additions",
+                 "kind": "positive", "value": 1234.56},
+            ],
         }
 
 Rules of the artifact:
@@ -436,11 +445,13 @@ Sandbox environment (import and go):
 Verification is arithmetic, not opinion: the harness imports your module and
 runs parse() on EVERY statement given; each must yield a valid canonical dict
 AND reconcile (opening + sum(amounts) == closing; printed balances must track
-when present). Every gate error is remedial — crashes carry a HINT, schema
-errors name the row and the fix, reconcile failures name the divergent row.
-Read the error; it describes exactly what to change. End the script with a
-demo guarded by if __name__ == "__main__": parse the first statement, print
-it, reconcile.
+when present; bound totals must match their parsed sums — they catch what
+end-to-end reconcile cannot: a dropped offsetting pair or a double sign
+flip still balances). Every gate error is remedial — crashes carry a HINT,
+schema errors name the row and the fix, reconcile failures name the
+divergent row. Read the error; it describes exactly what to change. End the
+script with a demo guarded by if __name__ == "__main__": parse the first
+statement, print it, reconcile.
 """
 
 PY_CONTRACT = """Contract for every response:
@@ -547,6 +558,9 @@ already works for at least one statement. Rules of maintenance:
 - Diagnose from the baseline verdict first: it names each failing statement
   and the exact error (crash hint, schema row, or reconcile divergence).
   Read it before touching anything.
+- When a statement prints section totals ("Total deposits and other
+  additions", ...), bind them into totals[] — independent accuracy checks
+  that catch errors end-to-end reconcile mathematically cannot see.
 - You already hold the layout knowledge in the baseline code; probe (first
   line '# probe', as always) only what the baseline doesn't explain — e.g.
   the failing statement's header row, its stop words, its money formats."""
