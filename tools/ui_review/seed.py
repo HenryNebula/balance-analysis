@@ -57,6 +57,10 @@ def wait_terminal(client, run_id, timeout=120):
     raise SystemExit(f"run {run_id} did not terminate")
 
 
+DEMO_SLUGS = ("blue-lantern-savings", "copper-kettle-checking",
+              "harbour-import-attempts", "run-lab", "probe-playground")
+
+
 def main() -> None:
     data_root = REPO / "data"
 
@@ -73,6 +77,8 @@ def main() -> None:
 
     client = TestClient(create_app(data_root=data_root,
                                    harness_script=CANNED_FULL))
+    for slug in DEMO_SLUGS:  # idempotent: only ever our own demo accounts
+        client.delete(f"/accounts/{slug}")
 
     create(client, "Blue Lantern Savings")
     blue = upload(client, "blue-lantern-savings", BLUE)
