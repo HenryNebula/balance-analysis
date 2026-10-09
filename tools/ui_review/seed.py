@@ -11,6 +11,7 @@ never deletes anything (it once ate a live account mid-demo).
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -62,7 +63,8 @@ DEMO_SLUGS = ("blue-lantern-savings", "copper-kettle-checking",
 
 
 def main() -> None:
-    data_root = REPO / "data"
+    data_root = Path(os.environ.get("STMTLEDGER_WEB_DATA",
+                                    str(REPO / "data")))
 
     # A canned PROBE script for the failed run (its selections paint the
     # overlay); the registry module itself converges the other run.

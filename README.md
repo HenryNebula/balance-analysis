@@ -90,6 +90,19 @@ dependency group; the wheel still ships only `statementledger`. **No auth,
 localhost only** — statements are sensitive financial data. Do not
 port-forward or run on a shared host.
 
+Storage is durable and repo-independent: everything the app writes at
+runtime — accounts, statements, runs, **and parsers distilled through the
+UI** — lives under `STMTLEDGER_WEB_DATA` (default
+`~/.local/share/statementledger`). Distilled parsers go to a user-registry
+*overlay* (`data/registry/`, shadowing same-key built-ins) and are user
+data, never committed; the shipped `src/statementledger/registry/` stays
+curated. To seed the demo accounts into that store:
+
+```console
+$ STMTLEDGER_WEB_DATA=~/.local/share/statementledger \
+      uv run --group web python tools/ui_review/seed.py
+```
+
 When no registered parser verifies a statement, the UI offers one click into
 the distill harness: launch a run (draft for a new bank, maintain to evolve
 the pinned parser), watch it live — round timeline, gate verdicts, and a PDF

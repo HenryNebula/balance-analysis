@@ -135,6 +135,12 @@ def create_app(data_root: Path | None = None,
     test seam for the whole runs pipeline (no LLM, real subprocess)."""
     store = Store(Path(data_root or os.environ.get("STMTLEDGER_WEB_DATA",
                                                    "data")))
+    # Parsers distilled at runtime are USER DATA: the overlay lives in the
+    # data tree (never the repo), shadows same-key built-ins, and the env
+    # var reaches the harness subprocess so it saves there too.
+    os.environ.setdefault("STATEMENTLEDGER_USER_REGISTRY",
+                          str(store.root / "registry"))
+    (store.root / "registry").mkdir(parents=True, exist_ok=True)
     max_bytes = int((max_mb or float(os.environ.get("STMTLEDGER_WEB_MAX_MB",
                                                     MAX_MB_DEFAULT)))
                     * 1024 * 1024)

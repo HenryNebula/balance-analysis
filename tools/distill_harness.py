@@ -50,7 +50,7 @@ load_env()
 
 import statementledger
 from statementledger.frames import frames_for
-from statementledger.registry import KEY_RE, REGISTRY
+from statementledger.registry import KEY_RE, REGISTRY, module_path
 
 # LLM endpoint (STATEMENTLEDGER_LLM_* in .env / environment; see .env.example)
 BASE_URL = os.environ.get("STATEMENTLEDGER_LLM_URL", "").rstrip("/")
@@ -1200,7 +1200,9 @@ def main() -> int:
     look_gate = True
     baseline = None
     if args.key:
-        source_path = REGISTRY / f"{args.key}.py"
+        source_path = module_path(args.key)
+        if not source_path.exists():
+            source_path = REGISTRY / f"{args.key}.py"
         if not source_path.exists():
             print(f"no registered parser {args.key!r} in {REGISTRY}")
             return 1
@@ -1218,7 +1220,7 @@ def main() -> int:
             print(f"{args.key} already verifies all {len(args.pdfs)} "
                   "statement(s) — nothing to maintain.")
             trajectory.emit("converged", key=args.key, path=str(
-                REGISTRY / f"{args.key}.py"), saved=False,
+                module_path(args.key)), saved=False,
                 note="baseline already verifies every statement")
             trajectory.close()
             trace.close()
@@ -1303,8 +1305,8 @@ def main() -> int:
         trace.close()
         return 0
 
-    REGISTRY.mkdir(exist_ok=True)
-    out_path = REGISTRY / f"{key}.py"
+    out_path = module_path(key)  # user overlay when the web app runs us
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(artifact["code"])
     print(f"\nVERIFIED parser saved: {out_path}")
     print("Reuse with zero LLM:")
