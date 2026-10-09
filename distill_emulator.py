@@ -190,6 +190,167 @@ def section_markers(
     return hits
 
 
+# --- Grid materialization: the ledger IS a table ---------------------------------
+#
+# Spatial reasoning is the harness's job, not the model's. A ledger's header
+# row defines the columns; every data cell falls under one. table() projects
+# the geometry onto that grid deterministically and returns regular rows.
+
+COLUMN_WORD_RE = re.compile(
+    r"^(date|posted|description|details|detail|amount|balance|debit|credit|"
+    r"withdrawals?|deposits?|type|ref|reference|no\.?|chq|cheque|value)$",
+    re.I,
+)
+
+
+def _moneyish(cell: str) -> bool:
+    if not cell.strip():
+        return False
+    words = cell.split()
+    return amount_format_of(words) is not None or bool(
+        re.match(r"(?i)^[-+]?\$?[\d,]+(\.\d+)?$", cell.strip())
+    )
+
+
+def find_header(lines: list[dict]) -> dict | None:
+    """The most header-like line: most items that are exactly common column
+    words (Date, Description, Amount, Balance, Debit, Credit, ...)."""
+    best, best_score = None, 0
+    for line in lines:
+        score = sum(
+            1 for item in line["items"] if COLUMN_WORD_RE.match(item[0].strip())
+        )
+        if score >= 2 and score > best_score:
+            best, best_score = line, score
+    return best
+
+
+def page_furniture(lines: list[dict]) -> set[int]:
+    """Indexes of repeated page furniture — lines whose full text recurs at
+    the same y on two or more pages (running headers/footers). The engine
+    drops these before parsing; the grid must too, or they masquerade as
+    continuation rows and pollute the Date column."""
+    seen: dict[tuple[str, int], set[int]] = {}
+    for index, line in enumerate(lines):
+        key = (line_text(line), line["y"])
+        seen.setdefault(key, set()).add(line["page"])
+    furniture = set()
+    for (text, y), pages in seen.items():
+        if len(pages) >= 2:
+            for index, line in enumerate(lines):
+                if line_text(line) == text and line["y"] == y:
+                    furniture.add(index)
+    return furniture
+
+
+def table(
+    lines: list[dict],
+    header: dict | None = None,
+    start: int | None = None,
+    stop: int | None = None,
+    stop_terms: tuple[str, ...] | list[str] = (),
+    sections: dict[str, str] | None = None,
+    merge_continuations: bool = True,
+) -> tuple[list[str], list[dict]]:
+    """Materialize the ledger grid: (columns, rows).
+
+    - header: the header line (auto-detected by find_header() when omitted)
+    - start/stop: data line range (default: after the header, to the first
+      line containing any stop term, else end of lines)
+    - sections: {label: marker} — every row carries "_section" set to the
+      label of the last marker line at or above it (sectioned statements:
+      withdrawals/deposits blocks over one shared column set)
+    - merge_continuations: rows with no date and no money merge their
+      description into the previous row (wrapped descriptions)
+
+    Column boundaries are the midpoints between adjacent header item
+    centers, edge columns open-ended — the grid a human sees. rows[i] maps
+    every column header to its cell text ("" when empty)."""
+    header = header or find_header(lines)
+    if header is None:
+        raise ValueError(
+            "no header row found — pass header=emu.header_line(lines, ...)"
+        )
+    heads = [(text.strip(), (x1 + x2) / 2) for text, x1, x2 in header["items"]]
+    heads.sort(key=lambda h: h[1])
+    columns = [text for text, _ in heads]
+    centers = [center for _, center in heads]
+    bounds = [
+        (float("-inf") if i == 0 else (centers[i - 1] + centers[i]) / 2,
+         float("inf") if i == len(centers) - 1 else (centers[i] + centers[i + 1]) / 2)
+        for i in range(len(centers))
+    ]
+
+    first = start if start is not None else lines.index(header) + 1
+    last = stop if stop is not None else len(lines)
+    if stop_terms and stop is None:
+        for i in range(first, len(lines)):
+            if any(term in line_text(lines[i]) for term in stop_terms):
+                last = min(last, i)
+                break
+
+    section_of: str | None = None
+    furniture = page_furniture(lines)
+    raw: list[dict] = []
+    for index in range(first, min(last, len(lines))):
+        if index in furniture:
+            continue
+        line = lines[index]
+        text = line_text(line)
+        if sections:
+            for label, marker in sections.items():
+                if marker in text:
+                    section_of = label
+                    break
+        row = {column: "" for column in columns}
+        for item_text, x1, x2 in line["items"]:
+            center = (x1 + x2) / 2
+            for column, (low, high) in zip(columns, bounds):
+                if low <= center < high:
+                    row[column] = (row[column] + " " + item_text).strip()
+                    break
+        row["_line"] = index
+        if sections:
+            row["_section"] = section_of
+        if not any(row[c] for c in columns):
+            continue  # blank line
+        if merge_continuations and raw:
+            has_money = any(_moneyish(row[c]) for c in columns)
+            has_date = any(
+                date_format_of(token)
+                for c in columns
+                for token in row[c].split()
+            )
+            desc = next(
+                (c for c in columns if "desc" in c.lower() or "detail" in c.lower()),
+                None,
+            )
+            if not has_money and not has_date and desc and row[desc]:
+                raw[-1][desc] = (raw[-1][desc] + " " + row[desc]).strip()
+                for c in columns:  # keep any stray non-description content
+                    if c != desc and row[c]:
+                        raw[-1][c] = (raw[-1][c] + " " + row[c]).strip()
+                continue
+        raw.append(row)
+    return columns, raw
+
+
+def render_table(columns: list[str], rows: list[dict], width: int = 28) -> None:
+    """Print the materialized grid as an aligned table — read it like a page."""
+    def cell(row, column):
+        text = str(row.get(column, ""))
+        return (text[: width - 1] + "…") if len(text) > width else text
+
+    cols = [c for c in columns if any(str(r.get(c, "")).strip() for r in rows)] + [
+        c for c in ("_section",) if any(r.get("_section") for r in rows)
+    ]
+    sizes = [max(len(c), *(len(cell(r, c)) for r in rows)) if rows else len(c) for c in cols]
+    print(" | ".join(c.ljust(sizes[i]) for i, c in enumerate(cols)))
+    print("-+-".join("-" * s for s in sizes))
+    for row in rows:
+        print(" | ".join(cell(row, c).ljust(sizes[i]) for i, c in enumerate(cols)))
+
+
 def region(
     lines: list[dict], start_term: str, stop_terms: tuple[str, ...] | list[str] = ()
 ) -> tuple[int, int]:

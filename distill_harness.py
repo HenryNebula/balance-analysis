@@ -69,6 +69,12 @@ MAX_TOKENS = 10000  # probe scripts are longer than config JSON
 EMU_API = """Working environment (your script runs with the statement frames
 already on disk; import and go):
 - import distill_emulator as emu
+- emu.table(lines, stop_terms=[...], sections={label: marker}) — MATERIALIZE
+  THE LEDGER GRID: columns from the header row, cells assigned by header
+  span, page furniture dropped, wrapped rows merged, optional per-row
+  "_section" label. THIS IS HOW YOU SEE THE TABLE — render_table() prints
+  it. Never rebuild the geometry by hand.
+- emu.render_table(columns, rows) — the grid as aligned text; read it.
 - frames = emu.load_frames() -> [{name, lines}]; each line is
   {"page": int, "y": int, "items": [[text, x1, x2], ...]}; y grows downward.
 - emu.show(lines, n=15, start=0) — print a slice of the layout with indices.
@@ -115,6 +121,14 @@ anchors = {label: emu.anchor_value(lines, label)
 print(anchors)
 opening = emu.parse_amount(anchors["Opening balance:"], emu.amount_format_of(anchors["Opening balance:"]))
 closing = emu.parse_amount(anchors["Closing balance:"], emu.amount_format_of(anchors["Closing balance:"]))
+
+# materialize the ledger grid and READ it (sections optional, drop if absent)
+columns, rows = emu.table(
+    lines, stop_terms=["End of transactions"],
+    sections={"debit": "Withdrawals and other subtractions",
+              "credit": "Deposits and other additions"},
+)
+emu.render_table(columns, rows[:8])
 
 # header row, spans, table region (use the words you saw in the show() output)
 header = emu.header_line(lines, "Date", "Description", "Balance")
@@ -235,6 +249,10 @@ tokens parse under the formats you intend to declare, reconcile the signed
 amounts against the printed opening/closing balances, then call
 emu.build_config(...) with the verified parameters. Return the complete
 script in one ```python fence.
+
+emu.table() materializes the ledger into regular rows and columns —
+probe with it and READ the rendered grid instead of reconstructing the
+geometry by hand; verify amounts and reconcile against it.
 
 When you are NOT yet sure what a label, header or stop word says, first
 return a BURNER PROBE — a short script whose first line is exactly
