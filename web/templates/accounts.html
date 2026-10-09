@@ -39,15 +39,14 @@
   <div class="card card-form">
     <h2>New account</h2>
     <form method="post" action="/accounts" class="form-row">
-      <label>Display name
+      <label>Display name <span class="req" title="required">*</span>
         <input type="text" name="display_name" required placeholder="Blue Lantern Savings">
       </label>
-      <label>Parser
+      <label>Parser <span class="text-muted">(optional)</span>
         <select name="registry_key">
           <option value="">auto-detect</option>
           {% for key in keys %}<option value="{{ key }}">{{ key }}</option>{% endfor %}
         </select>
-        <span class="hint">optional</span>
       </label>
       <button type="submit" class="btn btn-primary">Create account</button>
     </form>

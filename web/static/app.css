@@ -82,6 +82,7 @@ a { color: var(--accent); }
 .new-account[open] summary { margin-bottom: 10px; }
 .new-account .card { margin-top: 10px; }
 .hint { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
+.req { color: var(--fail); font-weight: 600; }
 
 /* danger zone */
 .danger-zone summary { list-style: none; width: max-content; }
