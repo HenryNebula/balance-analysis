@@ -1,0 +1,152 @@
+{
+  "bank_name": "Copper Kettle Bank",
+  "account_number": "1234 5678 9123 4567",
+  "opening_balance": 25000.0,
+  "closing_balance": 14972.32,
+  "transactions": [
+    {
+      "date": "2026-02-01",
+      "description": "Payroll deposit",
+      "amount": -131.06,
+      "balance": 24868.94
+    },
+    {
+      "date": "2026-02-03",
+      "description": "Rent payment",
+      "amount": -371.62,
+      "balance": 24497.32
+    },
+    {
+      "date": "2026-02-04",
+      "description": "Grocery run",
+      "amount": -694.25,
+      "balance": 23803.07
+    },
+    {
+      "date": "2026-02-05",
+      "description": "Utility bill electric",
+      "amount": -738.85,
+      "balance": 23064.22
+    },
+    {
+      "date": "2026-02-06",
+      "description": "Internet subscription",
+      "amount": -315.8,
+      "balance": 22748.42
+    },
+    {
+      "date": "2026-02-06",
+      "description": "Pharmacy pickup",
+      "amount": -241.87,
+      "balance": 22506.55
+    },
+    {
+      "date": "2026-02-07",
+      "description": "Restaurant lunch",
+      "amount": -123.39,
+      "balance": 22383.16
+    },
+    {
+      "date": "2026-02-08",
+      "description": "Bookshop order",
+      "amount": -799.87,
+      "balance": 21583.29
+    },
+    {
+      "date": "2026-02-08",
+      "description": "Train pass top-up",
+      "amount": -1212.79,
+      "balance": 20370.5
+    },
+    {
+      "date": "2026-02-09",
+      "description": "Gym membership",
+      "amount": -220.23,
+      "balance": 20150.27
+    },
+    {
+      "date": "2026-02-10",
+      "description": "Phone bill",
+      "amount": -774.15,
+      "balance": 19376.12
+    },
+    {
+      "date": "2026-02-11",
+      "description": "Insurance premium",
+      "amount": -579.65,
+      "balance": 18796.47
+    },
+    {
+      "date": "2026-02-12",
+      "description": "Refund from retailer",
+      "amount": -440.42,
+      "balance": 18356.05
+    },
+    {
+      "date": "2026-02-13",
+      "description": "Transfer to savings",
+      "amount": -122.65,
+      "balance": 18233.4
+    },
+    {
+      "date": "2026-02-15",
+      "description": "Cash withdrawal",
+      "amount": -75.24,
+      "balance": 18158.16
+    },
+    {
+      "date": "2026-02-16",
+      "description": "Interest payment",
+      "amount": -280.51,
+      "balance": 17877.65
+    },
+    {
+      "date": "2026-02-16",
+      "description": "Coffee subscription",
+      "amount": -77.42,
+      "balance": 17800.23
+    },
+    {
+      "date": "2026-02-18",
+      "description": "Hardware store",
+      "amount": -590.2,
+      "balance": 17210.03
+    },
+    {
+      "date": "2026-02-20",
+      "description": "Dentist invoice",
+      "amount": -204.38,
+      "balance": 17005.65
+    },
+    {
+      "date": "2026-02-20",
+      "description": "Monthly donation",
+      "amount": -320.53,
+      "balance": 16685.12
+    },
+    {
+      "date": "2026-02-22",
+      "description": "Streaming service",
+      "amount": -385.03,
+      "balance": 16300.09
+    },
+    {
+      "date": "2026-02-23",
+      "description": "Bakery and cafe",
+      "amount": -255.85,
+      "balance": 16044.24
+    },
+    {
+      "date": "2026-02-24",
+      "description": "Fuel station",
+      "amount": -772.29,
+      "balance": 15271.95
+    },
+    {
+      "date": "2026-02-24",
+      "description": "Market vegetables",
+      "amount": -299.63,
+      "balance": 14972.32
+    }
+  ]
+}

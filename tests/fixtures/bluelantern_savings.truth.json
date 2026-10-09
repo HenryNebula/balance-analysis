@@ -1,0 +1,92 @@
+{
+  "bank_name": "Blue Lantern Savings Bank",
+  "account_number": "9876 5432",
+  "opening_balance": 8214.6,
+  "closing_balance": 10278.09,
+  "transactions": [
+    {
+      "date": "2026-03-01",
+      "description": "Interest paid",
+      "amount": 42.17,
+      "balance": 8256.77
+    },
+    {
+      "date": "2026-03-03",
+      "description": "ATM withdrawal downtown",
+      "amount": 252.61,
+      "balance": 8509.38
+    },
+    {
+      "date": "2026-03-05",
+      "description": "Monthly transfer out",
+      "amount": 334.42,
+      "balance": 8843.8
+    },
+    {
+      "date": "2026-03-07",
+      "description": "Dividend deposit",
+      "amount": 308.03,
+      "balance": 9151.83
+    },
+    {
+      "date": "2026-03-09",
+      "description": "Utility autopay",
+      "amount": 315.53,
+      "balance": null
+    },
+    {
+      "date": "2026-03-11",
+      "description": "Wire from employer",
+      "amount": 361.12,
+      "balance": 9828.48
+    },
+    {
+      "date": "2026-03-13",
+      "description": "Card purchase bookstore",
+      "amount": 358.56,
+      "balance": 10187.04
+    },
+    {
+      "date": "2026-03-15",
+      "description": "Card purchase grocer",
+      "amount": -243.75,
+      "balance": 9943.29
+    },
+    {
+      "date": "2026-03-17",
+      "description": "Service fee refund",
+      "amount": 486.97,
+      "balance": 10430.26
+    },
+    {
+      "date": "2026-03-19",
+      "description": "Transfer from checking",
+      "amount": -3.7,
+      "balance": null
+    },
+    {
+      "date": "2026-03-21",
+      "description": "Tax refund",
+      "amount": -63.2,
+      "balance": 10363.36
+    },
+    {
+      "date": "2026-03-23",
+      "description": "Charity donation",
+      "amount": 219.36,
+      "balance": 10582.72
+    },
+    {
+      "date": "2026-03-25",
+      "description": "Hardware order screws",
+      "amount": -1.62,
+      "balance": 10581.1
+    },
+    {
+      "date": "2026-03-27",
+      "description": "Cash deposit branch",
+      "amount": -303.01,
+      "balance": 10278.09
+    }
+  ]
+}
