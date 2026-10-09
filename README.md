@@ -90,11 +90,20 @@ dependency group; the wheel still ships only `statementledger`. **No auth,
 localhost only** — statements are sensitive financial data. Do not
 port-forward or run on a shared host.
 
+When no registered parser verifies a statement, the UI offers one click into
+the distill harness: launch a run (draft for a new bank, maintain to evolve
+the pinned parser), watch it live — round timeline, gate verdicts, and a PDF
+overlay showing what each probe looked at — and on convergence the pending
+statements are parsed automatically with the new parser. Runs need
+`STATEMENTLEDGER_LLM_*` in `.env`; one active run at a time; cancel is always
+one click. `/runs` lists every run; a run against an existing harness
+workdir can be attached (tail-watch, no live selections).
+
 ## Development
 
 ```console
 $ uv sync --group web
-$ uv run --group web pytest                         # 69 tests
+$ uv run --group web pytest                         # 90 tests
 $ uv run python tools/fixtures/gen_fixtures.py      # regenerate fixtures
 $ uv build                                          # wheel: package + registry only
 ```

@@ -43,6 +43,36 @@
 
 {% include "statements_region.html" %}
 
+{% if runs %}
+<h2>Distill runs</h2>
+<table class="table table-tight">
+  <thead><tr><th>Run</th><th>Mode</th><th>Status</th><th>Started</th><th></th></tr></thead>
+  <tbody>
+    {% for run in runs %}
+    <tr>
+      <td class="mono">{{ run.id }}</td>
+      <td>{{ run.mode }}{% if run.attach %} (attach){% endif %}</td>
+      <td>
+        {% if run.status == 'running' %}<span class="chip chip-key">▶ running</span>
+        {% elif run.status == 'converged' %}<span class="chip chip-ok">✓ {{ run.converged_key or 'converged' }}</span>
+        {% elif run.status == 'cancelled' %}<span class="chip chip-muted">cancelled</span>
+        {% elif run.status == 'orphaned' %}<span class="chip chip-warn">orphaned</span>
+        {% else %}<span class="chip chip-fail">✗ failed</span>{% endif %}
+      </td>
+      <td>{{ run.created_at|dt }}</td>
+      <td class="td-actions">
+        {% if run.status in ('running', 'cancelling') %}
+        <a class="btn btn-small" href="/runs/{{ run.id }}">Watch live</a>
+        {% else %}
+        <a class="btn btn-small" href="/runs/{{ run.id }}">View run</a>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <div class="row-end">
   {% if account.registry_key %}
   <button class="btn" title="sequential per-statement parse with the pinned key; reports old→new drift"

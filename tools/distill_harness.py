@@ -37,6 +37,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -615,6 +616,93 @@ class Trace:
         self._file.close()
 
 
+# --- Trajectory (optional NDJSON event stream for the web UI, §9.1) -------------
+
+
+SELECT_BAND = 11  # pt: highlight band height around a frames line (y is the
+                  # binned bottom edge, not glyph height — one knob, tuned once)
+
+
+class Trajectory:
+    """One JSON object per line, flushed as it happens (--jsonl-trajectory).
+    The web backend tails this file and relays it over SSE to the live run
+    view. Nothing here runs without the flag — the CLI is unchanged.
+    Consumers ignore unknown event types: the schema is additive."""
+
+    def __init__(self, path: Path | None):
+        self._file = (path.open("a", encoding="utf-8") if path is not None
+                      else None)
+
+    @property
+    def enabled(self) -> bool:
+        return self._file is not None
+
+    def emit(self, type_: str, **fields) -> None:
+        if self._file is None:
+            return
+        event = {"type": type_, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        event.update(fields)
+        self._file.write(json.dumps(event, default=str) + "\n")
+        self._file.flush()
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+
+
+def resolve_selection(stdout: str, lines: list[dict]) -> dict | None:
+    """What the probe was LOOKING at, as data: the optional SELECT: line the
+    probe printed — SELECT:{"page": P, "lines": [start, end), "label": …} —
+    resolved against the statement's frames lines into {page, line_ids, rect,
+    label}. Without a SELECT: line, falls back to the line indices pl.show()
+    printed. rect is in pdfplumber points (y downward), page top-left origin,
+    so the web overlay maps it as px = pt * render_scale."""
+    selection = None
+    for match in re.finditer(r"^SELECT:(\{.*\})\s*$", stdout, re.M):
+        try:
+            selection = json.loads(match.group(1))
+        except ValueError:
+            continue
+    ids: list[int] = []
+    page = 0
+    label = ""
+    if selection:
+        page = int(selection.get("page") or 0)
+        span = selection.get("lines") or []
+        if len(span) == 2:  # half-open [start, end)
+            ids = list(range(max(0, span[0]), min(len(lines), span[1])))
+        elif span and isinstance(span[0], int):  # explicit id list
+            ids = [i for i in span if isinstance(i, int) and 0 <= i < len(lines)]
+        label = str(selection.get("label") or "")
+    else:
+        shown = [int(index) for index in
+                 re.findall(r"^(\d{1,4}) [\[{]", stdout, re.M)]
+        if not shown:
+            return None
+        ids = list(range(min(shown), max(shown) + 1))
+        label = "probe show() output"
+    ids = [i for i in ids if lines[i]["page"] == page]
+    if not ids:
+        return None
+    x1 = min(item[1] for i in ids for item in lines[i]["items"]) if any(
+        lines[i]["items"] for i in ids) else 0
+    x2 = max(item[2] for i in ids for item in lines[i]["items"]) if any(
+        lines[i]["items"] for i in ids) else 0
+    top = min(lines[i]["y"] for i in ids) - SELECT_BAND
+    bottom = max(lines[i]["y"] for i in ids) + 2
+    return {"page": page, "line_ids": ids,
+            "rect": [x1, top, x2, bottom], "label": label}
+
+
+SELECT_PROMPT = """Probes may end with ONE extra line that names the region just examined:
+
+SELECT:{"page": 0, "lines": [8, 35], "label": "transaction rows"}
+
+(a half-open line-index range into pl.load_frames()[0]['lines'], same indices
+pl.show() prints). It is optional data for the live run view — nothing is
+graded on it; print it only when the region is genuinely what you looked at."""
+
+
 # --- The loop ------------------------------------------------------------------
 
 
@@ -685,11 +773,13 @@ def draft_by_repl(
     require_key: str | None = None,
     enforce_look_gate: bool = True,
     max_probes: int | None = None,
+    trajectory: "Trajectory | None" = None,
 ) -> tuple[dict | None, bool, list[dict]]:
     """Returns ({key, code} or None, verified?, round history). Maintain mode
     (require_key set) pins KEY to the registered parser being evolved;
     task_message replaces the drafted task template (it embeds the baseline
     source and its gate verdict)."""
+    events = trajectory if trajectory is not None else Trajectory(None)
     frames = frames_for(pdfs, workdir)
     first = frames["statements"][0]
     trace.log(
@@ -697,6 +787,10 @@ def draft_by_repl(
         f"{len(frames['statements'])} statement(s); {first['name']}: "
         f"{len(first['lines'])} lines",
     )
+    events.emit("frames", statements=[
+        {"name": s["name"], "pages": 1 + max((l["page"] for l in s["lines"]),
+                                             default=-1),
+         "lines": len(s["lines"])} for s in frames["statements"]])
 
     messages: list[dict] = []
     history: list[dict] = []
@@ -711,6 +805,7 @@ def draft_by_repl(
 
     for round_number in range(rounds):
         started = time.perf_counter()
+        events.emit("round_started", round=round_number)
         if canned_script is not None:
             code = canned_script.read_text()
         else:
@@ -731,6 +826,8 @@ def draft_by_repl(
                 raw = chat_code(messages)
             except RuntimeError as error:
                 trace.log(f"round {round_number} chat failed", str(error))
+                events.emit("chat_failed", round=round_number,
+                            error=str(error)[:400])
                 print(f"round {round_number}: chat failed, skipping ({str(error)[:90]})")
                 history.append(
                     {"round": round_number, "outcome": f"chat failed: {str(error)[:120]}"}
@@ -747,14 +844,19 @@ def draft_by_repl(
                 messages.append({"role": "assistant", "content": raw[:2000]})
                 messages.append({"role": "user", "content": feedback})
                 trace.log(f"round {round_number} feedback sent", feedback)
+                events.emit("feedback_sent", round=round_number,
+                            summary="no code block in response")
                 history.append({"round": round_number, "outcome": "no code block"})
                 print(f"round {round_number}: no code block in response")
                 continue
             messages.append({"role": "assistant", "content": code})
+            events.emit("model_output", round=round_number, chars=len(raw))
 
         violation = lint_code(code)
         if violation:
             trace.log(f"round {round_number} lint rejected", violation)
+            events.emit("lint_rejected", round=round_number,
+                        violation=violation)
             print(f"round {round_number}: lint rejected ({violation[:70]})")
             if canned_script is not None:
                 history.append({"round": round_number, "outcome": f"lint: {violation}"})
@@ -772,6 +874,9 @@ def draft_by_repl(
         # requires one complete script through the full engine gate.
         is_probe = code.lstrip().splitlines()[0].strip().lower() == "# probe"
         (workdir / f"round_{round_number}.py").write_text(code)
+        events.emit("round_saved", round=round_number,
+                    kind="probe" if is_probe else "script",
+                    path=f"round_{round_number}.py")
 
         # Commit latch: once 90% of the turn budget is spent, probes close
         # for good — the run must converge on full scripts. The look-gate is
@@ -818,6 +923,8 @@ def draft_by_repl(
                 f"{instruction}"
             )
             trace.log(f"round {round_number} full script gated", f"{reason}\n" + feedback)
+            events.emit("feedback_sent", round=round_number,
+                        summary=f"look gate: {reason}")
             print(f"round {round_number}: full script gated ({reason})")
             messages.append({"role": "user", "content": feedback})
             history.append(
@@ -842,11 +949,17 @@ def draft_by_repl(
                 {"round": round_number, "outcome": f"probe bounced (budget {max_probes})"}
             )
             trace.log(f"round {round_number} probe bounced", "budget exhausted")
+            events.emit("feedback_sent", round=round_number,
+                        summary=f"probe bounced (budget {max_probes})")
             continue
         if is_probe:
             consecutive_probes += 1
             probes_done += 1
             outcome = run_script(workdir, f"round_{round_number}")
+            events.emit("round_ran", round=round_number,
+                        returncode=outcome["returncode"],
+                        elapsed=round(outcome["elapsed"], 2),
+                        stdout_tail=outcome["stdout"][-400:])
             # Tail coverage: show() prints zero-padded line indices at the
             # start of each row; an index near the document end means the
             # stop-word region was actually displayed.
@@ -857,6 +970,9 @@ def draft_by_repl(
             ]
             if shown and max(shown) >= total_lines - 8:
                 tail_seen = True
+            selection = resolve_selection(outcome["stdout"], first["lines"])
+            if selection:
+                events.emit("probe_select", round=round_number, **selection)
             trace.log(
                 f"round {round_number} probe output",
                 f"exit {outcome['returncode']}\n{outcome['stdout'][-4000:]}"
@@ -878,6 +994,8 @@ def draft_by_repl(
             )
             feedback = "\n\n".join(parts)
             trace.log(f"round {round_number} probe feedback sent", feedback)
+            events.emit("feedback_sent", round=round_number,
+                        summary="probe feedback (see trace)")
             messages.append({"role": "user", "content": feedback})
             continue
         consecutive_probes = 0
@@ -895,9 +1013,15 @@ def draft_by_repl(
                 messages.append({"role": "user", "content": feedback})
                 history.append({"round": round_number, "outcome": "key renamed"})
                 trace.log(f"round {round_number} rejected", feedback)
+                events.emit("feedback_sent", round=round_number,
+                            summary=f"MAINTAIN: KEY must stay {require_key}")
                 continue
 
         outcome = run_script(workdir, f"round_{round_number}")
+        events.emit("round_ran", round=round_number,
+                    returncode=outcome["returncode"],
+                    elapsed=round(outcome["elapsed"], 2),
+                    stdout_tail=outcome["stdout"][-400:])
         trace.log(
             f"round {round_number} script output",
             f"exit {outcome['returncode']} in {outcome['elapsed']:.1f}s\n"
@@ -906,6 +1030,7 @@ def draft_by_repl(
         artifact = None
         if outcome["returncode"] == 0 and "def parse(" in code:
             evaluation = py_gate(workdir, f"round_{round_number}", trace)
+            events.emit("gate", round=round_number, verdict=evaluation)
             if evaluation.get("clean", 0) > 0:
                 artifact = {"key": evaluation.get("key"), "code": code}
         else:
@@ -961,6 +1086,8 @@ def draft_by_repl(
         feedback = "\n\n".join(parts) + "\n\nReturn the complete corrected script."
         chars_in += len(feedback)
         trace.log(f"round {round_number} feedback sent", feedback)
+        events.emit("feedback_sent", round=round_number,
+                    summary=parts[0][:200] if parts else "")
 
         if code == previous_code:
             trace.line(
@@ -1022,22 +1149,46 @@ def main() -> int:
              "commit-now feedback (small models ignore the 90%% warning and "
              "probe forever; default: unlimited)",
     )
+    cli.add_argument(
+        "--jsonl-trajectory",
+        type=Path,
+        default=None,
+        help="append one JSON event per line to this file as the run happens "
+             "(rounds, gate verdicts, probe selections) — the web UI's live "
+             "run view tails it; without the flag nothing is written",
+    )
     args = cli.parse_args()
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     workdir = Path("logs") / f"distill_{stamp}_{args.pdfs[0].stem[:30]}"
     workdir.mkdir(parents=True, exist_ok=True)
     trace = Trace(workdir)
+    trajectory = Trajectory(args.jsonl_trajectory)
+
+    def _cancelled(signum, frame):  # noqa: ARG001 - signal handler signature
+        trajectory.emit("cancelled")
+        trajectory.close()
+        trace.close()
+        sys.exit(130)
+
+    if trajectory.enabled:
+        signal.signal(signal.SIGTERM, _cancelled)
+        signal.signal(signal.SIGINT, _cancelled)
 
     mode = f"canned script {args.script}" if args.script else f"{MODEL} at {BASE_URL}"
     print(f"distill harness: {len(args.pdfs)} statement(s), {mode}")
     print(f"workdir: {workdir}")
     trace.log("run start", f"mode={mode}\npdfs={[str(p) for p in args.pdfs]}")
+    trajectory.emit("run_started", pdfs=[p.name for p in args.pdfs],
+                    mode="maintain" if args.key else "draft",
+                    model=(str(args.script) if args.script else MODEL),
+                    rounds=args.rounds)
 
     system = (PY_SYSTEM_PROMPT + "\n\n" + PY_CONTRACT
               + "\n\nA complete parser for a different (demo) bank — "
                 "imitate its shape and length, not its labels:\n"
-                "```python\n" + PY_EXAMPLE + "\n```")
+                "```python\n" + PY_EXAMPLE + "\n```"
+                + "\n\n" + SELECT_PROMPT)
     template = PY_TASK_TEMPLATE
 
     # Maintain mode: stage the registered parser as the baseline, gate it
@@ -1056,6 +1207,7 @@ def main() -> int:
         (workdir / "baseline.py").write_text(baseline)
         frames = frames_for(args.pdfs, workdir)
         verdict = py_gate(workdir, "baseline", trace)
+        trajectory.emit("gate", round="baseline", verdict=verdict)
         print(
             "baseline: " + ("VERIFIED" if verdict["verified"] else
                             f"{verdict['clean']}/{len(args.pdfs)} statements reconcile")
@@ -1064,6 +1216,10 @@ def main() -> int:
             trace.log("result", "baseline already verifies every statement")
             print(f"{args.key} already verifies all {len(args.pdfs)} "
                   "statement(s) — nothing to maintain.")
+            trajectory.emit("converged", key=args.key, path=str(
+                REGISTRY / f"{args.key}.py"), saved=False,
+                note="baseline already verifies every statement")
+            trajectory.close()
             trace.close()
             return 0
         first = frames["statements"][0]
@@ -1085,10 +1241,20 @@ def main() -> int:
         system_prompt=system, task_template=template,
         task_message=task_message, require_key=require_key,
         enforce_look_gate=look_gate, max_probes=args.max_probes,
+        trajectory=trajectory,
     )
     if artifact is None or not verified:
         trace.log("result", f"FAILED ({'no artifact' if artifact is None else 'not verified'})")
         trace.log("round history", json.dumps(history, indent=2))
+        best_clean = 0
+        for entry in history:
+            match = re.match(r"(\d+)/(\d+) clean", entry.get("outcome", ""))
+            if match:
+                best_clean = max(best_clean, int(match.group(1)))
+        trajectory.emit("failed", reason=(
+            f"rounds exhausted (best: {best_clean}/{len(args.pdfs)} "
+            "statements clean)"))
+        trajectory.close()
         trace.close()
         print("\nFAILED: no verified parser.")
         print(json.dumps(history, indent=2))
@@ -1111,6 +1277,8 @@ def main() -> int:
     if args.no_save:
         print(f"\nVERIFIED (not saved, --no-save); parser drafted in {workdir}")
         trace.log("result", f"VERIFIED (not saved); parser drafted in {workdir}")
+        trajectory.emit("converged", key=key, path=str(workdir / "verified.py"),
+                        saved=False)
         # nothing is registered, so the reuse demo runs the drafted module
         # straight from the workdir
         import importlib.util
@@ -1130,6 +1298,7 @@ def main() -> int:
             )
             print(line)
             trace.line(line)
+        trajectory.close()
         trace.close()
         return 0
 
@@ -1140,6 +1309,7 @@ def main() -> int:
     print("Reuse with zero LLM:")
     print(f"  uv run statementledger statement.pdf --key {key}")
     trace.log("result", f"VERIFIED parser saved: {out_path}")
+    trajectory.emit("converged", key=key, path=str(out_path), saved=True)
 
     for pdf in args.pdfs:
         stmt = statementledger.parse(str(pdf), key=key)
@@ -1150,6 +1320,7 @@ def main() -> int:
         )
         print(line)
         trace.line(line)
+    trajectory.close()
     trace.close()
     return 0
 

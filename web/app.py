@@ -21,7 +21,9 @@ configured in base.html to swap 4xx fragments); domain outcomes — "parsed",
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import os
 import tempfile
 from collections import Counter
@@ -31,13 +33,14 @@ import statementledger as sl
 from fastapi import (FastAPI, File, Form, HTTPException, Request,
                      UploadFile)
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
-                               RedirectResponse, Response)
+                               RedirectResponse, Response, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from web import ledger, parsing
+from web import ledger, pages, parsing
+from web.runs import RunError, RunManager, TERMINAL_STATES
 from web.store import AccountExists, DuplicateStatement, Store
 
 MAX_MB_DEFAULT = 25
@@ -53,15 +56,86 @@ def _description(key: str) -> str:
         return "(module failed to load)"
 
 
+def _prov_pages(ledger: dict | None, frames: dict | None) -> list[dict]:
+    """Provenance overlay geometry (§9.5): one entry per page with highlight
+    bands for the anchors and every transaction that carries line info, in
+    CSS pixels at the raster scale. Empty when the parser adopted no
+    provenance convention."""
+    if not ledger or not frames:
+        return []
+    lines = frames["lines"]
+    bands = []
+
+    def band(line_no: int, kind: str, index: int, label: str) -> None:
+        if not isinstance(line_no, int) or not 0 <= line_no < len(lines):
+            return
+        line = lines[line_no]
+        items = line.get("items") or []
+        if not items:
+            return
+        x1 = min(item[1] for item in items)
+        x2 = max(item[2] for item in items)
+        top, bottom = line["y"] - 11, line["y"] + 2
+        bands.append({"page": line["page"], "kind": kind, "index": index,
+                      "label": label,
+                      "left": x1 * pages.SCALE, "top": top * pages.SCALE,
+                      "width": (x2 - x1) * pages.SCALE,
+                      "height": (bottom - top) * pages.SCALE})
+
+    for name, line_no in (ledger.get("_anchors") or {}).items():
+        band(line_no, "anchor", -1, name)
+    for index, txn in enumerate(ledger["transactions"]):
+        if txn.get("line") is not None:
+            band(txn["line"], "txn", index,
+                 str(txn.get("description", ""))[:60])
+    grouped: dict[int, list] = {}
+    for entry in bands:
+        grouped.setdefault(entry["page"], []).append(entry)
+    return [{"page": page, "bands": page_bands}
+            for page, page_bands in sorted(grouped.items())]
+
+
+_llm_env_loaded = False
+
+
+def _load_llm_env(repo_root: Path) -> None:
+    """Load the repo's .env (exports win) — lazily, once per process; the
+    launch dialog wants the model name and a real run needs the endpoint."""
+    global _llm_env_loaded
+    if _llm_env_loaded:
+        return
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "envloader", repo_root / "tools" / "envloader.py")
+    envloader = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(envloader)
+    envloader.load_env()
+    _llm_env_loaded = True
+
+
 def create_app(data_root: Path | None = None,
-               max_mb: float | None = None) -> FastAPI:
-    app = FastAPI(title="statementledger", docs_url=None, redoc_url=None,
-                  openapi_url=None)
+               max_mb: float | None = None,
+               harness_script: Path | None = None) -> FastAPI:
+    """harness_script: run this canned script instead of the LLM loop — the
+    test seam for the whole runs pipeline (no LLM, real subprocess)."""
     store = Store(Path(data_root or os.environ.get("STMTLEDGER_WEB_DATA",
                                                    "data")))
     max_bytes = int((max_mb or float(os.environ.get("STMTLEDGER_WEB_MAX_MB",
                                                     MAX_MB_DEFAULT)))
                     * 1024 * 1024)
+    repo_root = Path(__file__).resolve().parents[1]
+    runs = RunManager(store, repo_root, harness_script=harness_script)
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        runs.adopt()  # re-watch live runs, orphan the dead ones (§8.2)
+        yield
+
+    app = FastAPI(title="statementledger", docs_url=None, redoc_url=None,
+                  openapi_url=None, lifespan=lifespan)
 
     here = Path(__file__).parent
     env = Environment(loader=FileSystemLoader(here / "templates"),
@@ -169,11 +243,15 @@ def create_app(data_root: Path | None = None,
     def account_detail(slug: str, request: Request):
         account = require_account(slug)
         metas = store.statements(slug)
+        _load_llm_env(repo_root)
         return render("account.html", request, account=account, metas=metas,
                       ledger=_latest_ledger(slug), keys=sl.keys(),
                       outcome=None, error=None,
                       chain=ledger.chain(metas, sl.TOL),
-                      warnings=ledger.period_warnings(metas))
+                      warnings=ledger.period_warnings(metas),
+                      runs=_account_runs(slug),
+                      llm_model=os.environ.get(
+                          "STATEMENTLEDGER_LLM_MODEL", ""))
 
     @app.delete("/accounts/{slug}")
     def delete_account(slug: str, request: Request):
@@ -255,10 +333,13 @@ def create_app(data_root: Path | None = None,
                     body[extra] = outcome[extra]
             return JSONResponse(body, status_code=status)
         metas = store.statements(slug)
+        _load_llm_env(repo_root)
         return render("statements_region.html", request, status=status,
                       account=store.get_account(slug), metas=metas,
                       outcome=outcome, ledger=_latest_ledger(slug),
-                      warnings=ledger.period_warnings(metas))
+                      warnings=ledger.period_warnings(metas),
+                      llm_model=os.environ.get(
+                          "STATEMENTLEDGER_LLM_MODEL", ""))
 
     @app.post("/accounts/{slug}/statements")
     def upload_statement(slug: str, request: Request,
@@ -326,9 +407,26 @@ def create_app(data_root: Path | None = None,
             raise HTTPException(404, f"no statement {sid!r} in {slug!r}")
         ledger = store.statement_ledger(slug, sid)
         verified = sl.reconcile_statement(ledger) is None if ledger else None
+        _load_llm_env(repo_root)
+        # §9.5 stretch: parsers MAY adopt a provenance convention
+        # (txn["line"], stmt["_anchors"]); without it there is no overlay.
+        provenance = None
+        has_provenance = bool(ledger) and (
+            ledger.get("_anchors")
+            or any(txn.get("line") is not None
+                   for txn in ledger["transactions"]))
+        if has_provenance:
+            try:
+                provenance = pages.cached_frames(
+                    store.original_pdf(slug, sid), store.root / "cache")
+            except Exception:  # noqa: BLE001 - overlay degrades gracefully
+                provenance = None
         return render("statement.html", request, account=account, meta=meta,
                       ledger=ledger, verified=verified,
-                      pdf_rel=_pdf_rel(slug, sid))
+                      pdf_rel=_pdf_rel(slug, sid),
+                      prov_pages=_prov_pages(ledger, provenance),
+                      llm_model=os.environ.get(
+                          "STATEMENTLEDGER_LLM_MODEL", ""))
 
     @app.get("/accounts/{slug}/statements/{sid}/original.pdf")
     def original_pdf(slug: str, sid: str, request: Request):
@@ -473,6 +571,186 @@ def create_app(data_root: Path | None = None,
     def registry_json():
         return [{"key": row["key"], "description": row["description"]}
                 for row in _registry_rows()]
+
+    # -- PDF pages + frames (overlay geometry, §9.3) --------------------------
+
+    def _statement_paths(slug: str, sid: str) -> tuple[dict, Path]:
+        account = require_account(slug)
+        if not store.statement_exists(slug, sid):
+            raise HTTPException(404, f"no statement {sid!r} in {slug!r}")
+        return account, store.original_pdf(slug, sid)
+
+    @app.get("/accounts/{slug}/statements/{sid}/pages/{page}.png")
+    def statement_page_png(slug: str, sid: str, page: int, request: Request):
+        _, pdf = _statement_paths(slug, sid)
+        try:
+            png = pages.page_png(pdf, page, store.root / "cache")
+        except Exception as error:  # noqa: BLE001 - damaged PDFs, as data
+            raise HTTPException(422, f"could not render page {page}: "
+                                     f"{type(error).__name__}: {error}")
+        if png is None:
+            raise HTTPException(404, f"page {page} does not exist")
+        return FileResponse(png, media_type="image/png")
+
+    @app.get("/accounts/{slug}/statements/{sid}/frames.json")
+    def statement_frames(slug: str, sid: str, request: Request):
+        _, pdf = _statement_paths(slug, sid)
+        try:
+            return JSONResponse(pages.cached_frames(pdf, store.root / "cache"))
+        except Exception as error:  # noqa: BLE001
+            raise HTTPException(422, f"could not extract frames: "
+                                     f"{type(error).__name__}: {error}")
+
+    # -- distill runs (§8–§9): the one real background job ---------------------
+
+    @app.post("/runs")
+    async def launch_run(request: Request):
+        """JSON {account_slug, statement_ids, mode, key?, rounds?,
+        max_probes?, workdir?} or the same fields as a form. workdir set =
+        attach to an existing harness run (tail-watch fallback, §8.2b)."""
+        if request.headers.get("content-type", "").startswith(
+                "application/json"):
+            payload = await request.json()
+        else:
+            form = await request.form()
+            payload = {key: form[key] for key in (
+                "account_slug", "statement_ids", "mode", "key", "rounds",
+                "max_probes", "workdir") if form.get(key)}
+        slug = str(payload.get("account_slug") or "")
+        account = store.get_account(slug)
+        if account is None:
+            raise HTTPException(404, f"no account {slug!r}")
+        ids = payload.get("statement_ids") or []
+        if isinstance(ids, str):
+            ids = [part.strip() for part in ids.split(",") if part.strip()]
+        mode = str(payload.get("mode") or "draft")
+        key = str(payload.get("key") or "").strip() or None
+        rounds = payload.get("rounds")
+        max_probes = payload.get("max_probes")
+        workdir = str(payload.get("workdir") or "").strip() or None
+        if workdir:  # attach mode: resolve + sanity-check the workdir
+            candidate = (repo_root / workdir).resolve()
+            if not candidate.is_relative_to(repo_root) or not (
+                    candidate / "trace.log").exists():
+                raise HTTPException(400, f"{workdir!r} is not a harness "
+                                         "workdir (no trace.log)")
+            workdir = candidate
+        elif harness_script is None:  # a real LLM run needs the endpoint
+            _load_llm_env(repo_root)
+            if not os.environ.get("STATEMENTLEDGER_LLM_URL"):
+                raise HTTPException(
+                    400, "no LLM endpoint configured — set "
+                    "STATEMENTLEDGER_LLM_* in .env (see .env.example)")
+        try:
+            run = runs.create(account, ids, mode, key=key,
+                              rounds=int(rounds) if rounds else None,
+                              max_probes=(int(max_probes) if max_probes
+                                          else None),
+                              workdir=workdir)
+        except FileNotFoundError as error:
+            raise HTTPException(404, str(error))
+        except RunError as error:
+            status = 409 if "already active" in str(error) else 400
+            raise HTTPException(status, str(error))
+        target = f"/runs/{run['id']}"
+        if request.headers.get("hx-request"):
+            return Response(status_code=200,
+                            headers={"HX-Redirect": target})
+        if wants_json(request):
+            return JSONResponse({"run_id": run["id"]}, status_code=202)
+        return RedirectResponse(target, status_code=303)
+
+    @app.get("/runs", response_class=HTMLResponse)
+    def runs_list(request: Request):
+        items = runs.list()
+        if wants_json(request):
+            return JSONResponse(items)
+        return render("runs.html", request, runs=items)
+
+    @app.get("/runs/{run_id}", response_class=HTMLResponse)
+    def run_detail(run_id: str, request: Request):
+        try:
+            run = runs.get(run_id)
+        except FileNotFoundError:
+            raise HTTPException(404, f"no run {run_id!r}")
+        if wants_json(request):
+            return JSONResponse(run)
+        account = store.get_account(run["account_slug"])
+        first_sid = run["statement_ids"][0] if run["statement_ids"] else None
+        page_total = 0
+        model = ""
+        for _, event in runs.read_events(run_id):
+            if event.get("type") == "run_started" and event.get("model"):
+                model = event["model"]
+        if first_sid:
+            pdf = store.original_pdf(run["account_slug"], first_sid)
+            try:
+                page_total = pages.page_count(pdf, store.root / "cache")
+            except Exception:  # noqa: BLE001 - overlay degrades without pages
+                page_total = 0
+        config = {"id": run["id"], "slug": run["account_slug"],
+                  "sid": first_sid, "pages": page_total}
+        return render("run.html", request, run=run, account=account,
+                      model=model, pages=page_total,
+                      config=json.dumps(config))
+
+    @app.delete("/runs/{run_id}")
+    def cancel_run(run_id: str, request: Request):
+        try:
+            runs.cancel(run_id)
+        except FileNotFoundError:
+            raise HTTPException(404, f"no run {run_id!r}")
+        return Response(status_code=202)
+
+    @app.get("/runs/{run_id}/rounds/{number}")
+    def run_round(run_id: str, number: int, request: Request):
+        try:
+            detail = runs.round_detail(run_id, number)
+        except FileNotFoundError:
+            raise HTTPException(404, f"no run {run_id!r}")
+        if detail is None:
+            raise HTTPException(404, f"no round {number}")
+        return JSONResponse(detail)
+
+    @app.get("/runs/{run_id}/events")
+    async def run_events(run_id: str, request: Request):
+        """SSE relay of the harness trajectory: one event per line, id = the
+        sequence number, so reconnects (Last-Event-ID / ?after=) resume
+        without loss (§9.4). A terminal `run_status` event closes the stream
+        even when the harness died without writing one (SIGKILL)."""
+        try:
+            runs.get(run_id)
+        except FileNotFoundError:
+            raise HTTPException(404, f"no run {run_id!r}")
+        after = request.query_params.get("after") or \
+            request.headers.get("last-event-id") or "0"
+
+        async def stream():
+            seq = int(after)
+            while True:
+                if await request.is_disconnected():
+                    return
+                events = await run_in_threadpool(runs.read_events, run_id,
+                                                 seq)
+                for number, event in events:
+                    seq = number
+                    yield f"id: {seq}\ndata: {json.dumps(event)}\n\n"
+                run = await run_in_threadpool(runs.get, run_id)
+                if run.get("status") in TERMINAL_STATES:
+                    yield (f"id: {seq + 1}\nevent: run_status\ndata: "
+                           f'{json.dumps({"status": run["status"]})}\n\n')
+                    return
+                yield ": ping\n\n"
+                await asyncio.sleep(0.4)
+
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache"})
+
+    # -- account page: active + recent runs -----------------------------------
+
+    def _account_runs(slug: str) -> list[dict]:
+        return [run for run in runs.list()
+                if run["account_slug"] == slug][:5]
 
     app.mount("/static", StaticFiles(directory=here / "static"), name="static")
     return app

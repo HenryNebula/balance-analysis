@@ -477,3 +477,251 @@ def test_chain_pure_function():
          "balance": 95.5}]})
     assert csv_text.splitlines()[1] == ('2026-01-02,"Cafe, \'quotes\'",'
                                         '-4.50,95.50')
+
+
+# --- Phase 3: harness trajectory, runs, pages ----------------------------------
+
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+import time as _time  # noqa: E402
+
+REPO = Path(__file__).resolve().parent.parent
+CANNED_FULL = (REPO / "src" / "statementledger" / "registry"
+               / "us__bluelantern__savings__1.py")
+
+
+def _load_harness():
+    import importlib.util
+
+    sys.path.insert(0, str(REPO / "tools"))  # the harness does `import envloader`
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "distill_harness", REPO / "tools" / "distill_harness.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(REPO / "tools"))
+    return module
+
+
+def test_resolve_selection():
+    harness = _load_harness()
+    lines = json.loads(
+        (FIXTURES / "bluelantern_savings.frames.json").read_text()
+    )["statements"][0]["lines"]
+
+    # explicit SELECT: line -> resolved ids + bounding rect (pdfplumber pt)
+    stdout = ('001 ["x", 10, 20]\n'
+              'SELECT:{"page": 0, "lines": [2, 6], "label": "rows"}\n')
+    selection = harness.resolve_selection(stdout, lines)
+    assert selection["line_ids"] == [2, 3, 4, 5]
+    assert selection["label"] == "rows"
+    expected_x1 = min(item[1] for i in [2, 3, 4, 5]
+                      for item in lines[i]["items"])
+    expected_x2 = max(item[2] for i in [2, 3, 4, 5]
+                      for item in lines[i]["items"])
+    assert selection["rect"][0] == expected_x1
+    assert selection["rect"][2] == expected_x2
+
+    # no SELECT: -> fall back to the indices pl.show() printed
+    shown = "\n".join(f"{i:03d} [{lines[i]['items'][0][0][:8]!r}...]"
+                      for i in (3, 4, 5))
+    fallback = harness.resolve_selection(shown, lines)
+    assert fallback["line_ids"] == [3, 4, 5]
+
+    assert harness.resolve_selection("nothing here", lines) is None
+
+
+def test_harness_writes_trajectory(tmp_path):
+    events = tmp_path / "events.jsonl"
+    probe = tmp_path / "probe.py"
+    probe.write_text('# probe\nimport statementledger as pl\n'
+                     'pl.show(pl.load_frames()[0]["lines"], 4)\n')
+    result = subprocess.run(
+        [sys.executable, "tools/distill_harness.py", str(BLUE),
+         "--script", str(probe), "--rounds", "1", "--no-save",
+         "--jsonl-trajectory", str(events)],
+        cwd=REPO, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 1  # one probe round, nothing verified
+    types = [json.loads(line)["type"] for line in
+             events.read_text().splitlines()]
+    assert types[0] == "run_started"
+    assert "frames" in types and "round_saved" in types
+    assert "probe_select" in types  # show() output maps to a selection
+    assert types[-1] == "failed"
+
+
+@pytest.fixture()
+def run_client(tmp_path):
+    return TestClient(create_app(data_root=tmp_path / "data",
+                                 harness_script=CANNED_FULL))
+
+
+def _wait_terminal(client, run_id, timeout=90):
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        run = client.get(f"/runs/{run_id}", headers=JSON).json()
+        if run["status"] in ("converged", "failed", "cancelled", "orphaned"):
+            return run
+        _time.sleep(0.3)
+    pytest.fail(f"run {run_id} did not terminate")
+
+
+def _launch(client, slug, ids, mode="draft", **extra):
+    payload = {"account_slug": slug, "statement_ids": ids, "mode": mode}
+    payload.update(extra)
+    return client.post("/runs", json=payload, headers=JSON)
+
+
+def test_run_converges_and_auto_parses(run_client):
+    create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
+    sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
+    response = _launch(run_client, "blue-lantern-savings", [sid])
+    assert response.status_code == 202
+    run_id = response.json()["run_id"]
+    run = _wait_terminal(run_client, run_id)
+    assert run["status"] == "converged", run
+    assert run["converged_key"] == BLUE_KEY
+    # the pending statement was auto-parsed with the converged key
+    assert run["auto_parse"] == [{"id": sid, "status": "parsed",
+                                  "transactions": 14}]
+    page = run_client.get(f"/accounts/blue-lantern-savings/statements/{sid}")
+    assert "RECONCILED" in page.text
+
+    # the trajectory is complete and relays over SSE with a run_status close
+    stream = run_client.get(f"/runs/{run_id}/events")
+    assert stream.status_code == 200
+    assert stream.headers["content-type"].startswith("text/event-stream")
+    assert "converged" in stream.text and "run_status" in stream.text
+
+    # round artifacts are browsable
+    detail = run_client.get(f"/runs/{run_id}/rounds/0").json()
+    assert detail["kind"] == "script"
+    assert "def parse(" in detail["code"]
+    assert detail["verdict"]["verified"]
+
+
+def test_run_validation_and_lock(run_client, tmp_path, monkeypatch):
+    create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
+    sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
+    # a REAL run (no canned script) requires the LLM endpoint configured
+    monkeypatch.delenv("STATEMENTLEDGER_LLM_URL", raising=False)
+    plain = TestClient(create_app(data_root=tmp_path / "data-plain"))
+    create(plain, "Blue Lantern Savings", key=COPPER_KEY)
+    sid_plain = upload(plain, "blue-lantern-savings", BLUE).json()["id"]
+    assert _launch(plain, "blue-lantern-savings", [sid_plain]).status_code == 400
+
+    # with a canned script configured the env check is skipped (test seam)
+    first = _launch(run_client, "blue-lantern-savings", [sid])
+    assert first.status_code == 202
+    second = _launch(run_client, "blue-lantern-savings", [sid])
+    assert second.status_code == 409  # one active run at a time
+    assert _launch(run_client, "blue-lantern-savings", [sid],
+                   mode="maintain").status_code == 400  # maintain needs key
+    assert _launch(run_client, "nope-account", [sid]).status_code == 404
+    run_client.delete(f"/runs/{first.json()['run_id']}")
+    _wait_terminal(run_client, first.json()["run_id"])
+
+
+def test_run_cancel(tmp_path):
+    probe = tmp_path / "probe.py"
+    probe.write_text('# probe\nimport statementledger as pl\n'
+                     'pl.show(pl.load_frames()[0]["lines"], 4)\n')
+    slow = TestClient(create_app(data_root=tmp_path / "data-slow",
+                                 harness_script=probe))
+    create(slow, "Blue Lantern Savings", key=COPPER_KEY)
+    sid = upload(slow, "blue-lantern-savings", BLUE).json()["id"]
+    run_id = _launch(slow, "blue-lantern-savings", [sid],
+                     rounds=500).json()["run_id"]
+    _time.sleep(1.5)  # let a few rounds go by
+    cancel = slow.delete(f"/runs/{run_id}")
+    assert cancel.status_code == 202
+    run = _wait_terminal(slow, run_id)
+    assert run["status"] == "cancelled"
+    events = slow.get(f"/runs/{run_id}/events").text
+    assert "cancelled" in events
+    # a cancelled run frees the one-run lock
+    assert _launch(slow, "blue-lantern-savings", [sid],
+                   rounds=1).status_code == 202
+
+
+def test_attach_to_existing_run(run_client):
+    result = subprocess.run(  # a real harness run, no trajectory flag
+        [sys.executable, "tools/distill_harness.py", str(BLUE),
+         "--script", str(CANNED_FULL), "--rounds", "1", "--no-save"],
+        cwd=REPO, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0
+    workdir = next(line.split(": ", 1)[1] for line in result.stdout.splitlines()
+                   if line.startswith("workdir: "))
+    create(run_client, "Blue Lantern Savings")
+    response = _launch(run_client, "blue-lantern-savings", [], workdir=workdir)
+    assert response.status_code == 202
+    run = _wait_terminal(run_client, response.json()["run_id"])
+    assert run["status"] == "converged"  # derived from the trace's result
+    assert run["converged_key"] == BLUE_KEY
+    bad = _launch(run_client, "blue-lantern-savings", [],
+                  workdir="logs/definitely-not-there")
+    assert bad.status_code == 400
+
+
+def test_run_pages_render(run_client):
+    page = run_client.get("/runs")
+    assert page.status_code == 200
+    create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
+    sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
+    run_id = _launch(run_client, "blue-lantern-savings", [sid]).json()["run_id"]
+    _wait_terminal(run_client, run_id)
+    view = run_client.get(f"/runs/{run_id}")
+    assert view.status_code == 200
+    assert 'id="timeline"' in view.text and "/static/run.js" in view.text
+
+
+def test_statement_page_raster_and_frames(client):
+    create(client, "Blue Lantern Savings")
+    sid = upload(client, "blue-lantern-savings", BLUE).json()["id"]
+    png = client.get(f"/accounts/blue-lantern-savings/statements/{sid}"
+                     "/pages/0.png")
+    assert png.status_code == 200
+    assert png.headers["content-type"] == "image/png"
+    assert png.content[:8] == b"\x89PNG\r\n\x1a\n"
+    missing = client.get(f"/accounts/blue-lantern-savings/statements/{sid}"
+                         "/pages/99.png")
+    assert missing.status_code == 404
+    frames = client.get(f"/accounts/blue-lantern-savings/statements/{sid}"
+                        "/frames.json")
+    assert frames.status_code == 200
+    assert frames.json()["lines"]  # overlay geometry available
+
+
+def test_launch_dialog_on_failed_statement(client):
+    create(client, "Blue Lantern Savings", key=COPPER_KEY)
+    sid = upload(client, "blue-lantern-savings", BLUE).json()["id"]
+    page = client.get(f"/accounts/blue-lantern-savings/statements/{sid}")
+    assert "Register new bank" in page.text
+    assert "Launch draft run" in page.text
+    assert "Launch maintain run" in page.text  # account is pinned
+    # a fresh failed upload carries the dialog in its outcome card too
+    create(client, "Other Bank Account", key=COPPER_KEY)
+    card = upload(client, "other-bank-account", BLUE,
+                  headers={"hx-request": "true"})
+    assert "Register new bank" in card.text
+
+
+def test_prov_pages_geometry():
+    from web.app import _prov_pages
+
+    lines = json.loads(
+        (FIXTURES / "bluelantern_savings.frames.json").read_text()
+    )["statements"][0]["lines"]
+    frames = {"name": "x.pdf", "lines": lines}
+    ledger = {"_anchors": {"opening_balance": 2}, "transactions": [
+        {"date": "2026-03-01", "description": "a", "amount": 1, "balance": 2,
+         "line": 4}]}
+    pages = _prov_pages(ledger, frames)
+    assert [p["page"] for p in pages] == [0]
+    bands = pages[0]["bands"]
+    assert {b["kind"] for b in bands} == {"anchor", "txn"}
+    txn_band = next(b for b in bands if b["kind"] == "txn")
+    assert txn_band["left"] == min(item[1] for item in lines[4]["items"]) * 2
+    assert _prov_pages(ledger, None) == []
+    assert _prov_pages({"transactions": []}, frames) == []

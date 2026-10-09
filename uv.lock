@@ -676,6 +676,8 @@ dev = [
 web = [
     { name = "fastapi" },
     { name = "jinja2" },
+    { name = "pillow" },
+    { name = "pypdfium2" },
     { name = "python-multipart" },
     { name = "uvicorn" },
 ]
@@ -693,6 +695,8 @@ dev = [
 web = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "jinja2", specifier = ">=3.1" },
+    { name = "pillow", specifier = ">=10" },
+    { name = "pypdfium2", specifier = ">=4" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "uvicorn", specifier = ">=0.30" },
 ]

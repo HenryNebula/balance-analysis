@@ -54,6 +54,7 @@
             hx-post="/accounts/{{ account.slug }}/probe"
             hx-vals='{"statement_id": "{{ outcome.statement.id }}"}'
             hx-target="next .probe-slot">Re-probe parsers</button>
+    {% with sid = outcome.statement.id %}{% include "launch_dialog.html" %}{% endwith %}
     <a class="btn btn-small" href="/accounts/{{ account.slug }}/statements/{{ outcome.statement.id }}">view</a>
   </div>
   <div class="probe-slot"></div>

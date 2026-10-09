@@ -52,6 +52,45 @@
 </div>
 <div id="probe-slot"></div>
 
+{% if meta.status == 'failed' %}
+<div class="toolbar">
+  {% with sid = meta.id %}{% include "launch_dialog.html" %}{% endwith %}
+</div>
+{% endif %}
+
+{% if prov_bands %}
+{# §9.5 stretch: parsers MAY carry provenance (txn["line"], _anchors) —
+   highlight the printed lines each value came from; hover a ledger row to
+   light its line up. No convention → no overlay (degrades gracefully). #}
+<h2>Source lines</h2>
+<div class="text-muted">anchors in gold; transaction rows in blue — hover a row above to light its line.</div>
+<div class="pages-row">
+  {% for page_bands in prov_pages %}
+  <div class="prov-page">
+    <img src="/accounts/{{ account.slug }}/statements/{{ meta.id }}/pages/{{ page_bands.page }}.png" alt="page {{ page_bands.page + 1 }}">
+    {% for band in page_bands.bands %}
+    <div class="overlay-band {{ band.kind }}-band" data-txn="{{ band.index }}"
+         style="left: {{ band.left }}px; top: {{ band.top }}px; width: {{ band.width }}px; height: {{ band.height }}px"
+         title="{{ band.label }}"></div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
+<script>
+  document.querySelectorAll(".table-ledger tr[data-txn]").forEach(function (row) {
+    var id = row.getAttribute("data-txn");
+    row.addEventListener("mouseenter", function () {
+      document.querySelectorAll('.overlay-band[data-txn="' + id + '"]')
+        .forEach(function (band) { band.classList.add("lit"); });
+    });
+    row.addEventListener("mouseleave", function () {
+      document.querySelectorAll('.overlay-band[data-txn="' + id + '"]')
+        .forEach(function (band) { band.classList.remove("lit"); });
+    });
+  });
+</script>
+{% endif %}
+
 {% if ledger %}
 <table class="table table-ledger">
   <thead>
@@ -59,7 +98,7 @@
   </thead>
   <tbody>
     {% for txn in ledger.transactions %}
-    <tr>
+    <tr {% if txn.line is defined and txn.line is not none %}data-txn="{{ loop.index0 }}" data-line="{{ txn.line }}"{% endif %}>
       <td class="mono">{{ txn.date or '—' }}</td>
       <td>{{ txn.description }}</td>
       <td class="num">{{ txn.amount|signed }}</td>

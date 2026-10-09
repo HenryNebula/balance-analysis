@@ -1,0 +1,32 @@
+{# Launch a distill run for one stored statement (§6.2/§6.4). Expects
+   `sid`, `account`, `llm_model` in scope. Plain htmx forms — no JS. #}
+<details class="launch-dialog">
+  <summary class="btn btn-small">⚙ Register new bank…</summary>
+  <div class="launch-body">
+    <div class="text-muted">
+      Launches the distill harness: minutes-long LLM rounds, every round gated
+      on the arithmetic check, nothing registered until it reconciles.
+      {% if llm_model %}Model: <code>{{ llm_model }}</code>.{% else %}Model: set STATEMENTLEDGER_LLM_MODEL in .env.{% endif %}
+      Costs money; cancel anytime in the run view.
+    </div>
+    <form hx-post="/runs" hx-swap="none" class="form-row launch-form">
+      <input type="hidden" name="account_slug" value="{{ account.slug }}">
+      <input type="hidden" name="statement_ids" value="{{ sid }}">
+      <input type="hidden" name="mode" value="draft">
+      <label>Rounds <input type="number" name="rounds" value="30" min="1" max="100"></label>
+      <label>Max probes <input type="number" name="max_probes" value="8" min="1" max="50"></label>
+      <button type="submit" class="btn btn-small btn-primary">Launch draft run</button>
+    </form>
+    {% if account.registry_key %}
+    <form hx-post="/runs" hx-swap="none" class="form-row launch-form">
+      <input type="hidden" name="account_slug" value="{{ account.slug }}">
+      <input type="hidden" name="statement_ids" value="{{ sid }}">
+      <input type="hidden" name="mode" value="maintain">
+      <input type="hidden" name="key" value="{{ account.registry_key }}">
+      <label>Rounds <input type="number" name="rounds" value="30" min="1" max="100"></label>
+      <label>Max probes <input type="number" name="max_probes" value="8" min="1" max="50"></label>
+      <button type="submit" class="btn btn-small">Launch maintain run (evolve {{ account.registry_key }})</button>
+    </form>
+    {% endif %}
+  </div>
+</details>

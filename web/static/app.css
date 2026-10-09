@@ -156,3 +156,69 @@ input[type="text"], select {
 .text-muted { color: var(--ink-soft); }
 .text-warn { color: var(--warn); }
 .empty { color: var(--ink-soft); font-style: italic; padding: 10px 12px; }
+
+/* launch dialog (§6.2) */
+.launch-dialog { display: inline-block; }
+.launch-dialog summary { list-style: none; }
+.launch-body {
+  margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--card); max-width: 560px;
+}
+.launch-body .launch-form { margin-top: 8px; gap: 8px; }
+.launch-body input[type="number"] { min-width: 70px; width: 80px; }
+.launch-body label { font-size: 12px; }
+
+/* run view (§6.4/§9.4) */
+.run-controls { display: flex; gap: 10px; align-items: center; }
+.run-grid {
+  display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(320px, 1fr);
+  gap: 14px; margin-top: 12px;
+}
+.pane { border: 1px solid var(--line); border-radius: 10px; background: var(--card); display: flex; flex-direction: column; min-height: 480px; }
+.pane-bar {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 10px; border-bottom: 1px solid var(--line);
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+.pdf-viewport { overflow: auto; padding: 10px; flex: 1; }
+#pdf-stack { position: relative; width: max-content; transform-origin: top left; }
+#pdf-stack img { display: block; border: 1px solid var(--line); }
+#overlay { position: absolute; inset: 0; pointer-events: none; }
+.overlay-band {
+  position: absolute; background: rgba(43, 92, 255, 0.18);
+  border: 1px solid rgba(43, 92, 255, 0.65); border-radius: 2px;
+}
+.overlay-band.anchor-band {
+  background: rgba(196, 145, 16, 0.20); border-color: rgba(160, 116, 10, 0.7);
+}
+.overlay-band.lit { background: rgba(43, 92, 255, 0.45); }
+.pdf-selection { padding: 6px 10px; border-top: 1px solid var(--line); font-size: 12.5px; min-height: 30px; }
+
+.timeline { overflow-y: auto; max-height: 300px; padding: 8px 10px; flex: 0 1 auto; }
+.tl-round { border-left: 2px solid var(--line); margin-left: 6px; padding: 2px 0 2px 10px; }
+.tl-head {
+  background: none; border: none; padding: 0; cursor: pointer;
+  font-family: var(--mono); font-size: 12.5px; color: var(--ink);
+}
+.tl-head:hover { color: var(--accent); }
+.tl-detail { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 2px 0 6px; }
+.tl-note { width: 100%; color: var(--ink-soft); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.follow-dot {
+  display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  background: #c8cedb; cursor: pointer;
+}
+.follow-dot.active { background: var(--ok); }
+.code-bar { border-top: 1px solid var(--line); }
+.code-pane {
+  margin: 0; padding: 10px; overflow: auto; flex: 1; min-height: 160px;
+  font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  background: #0f1420; color: #dce3f2; border-radius: 0 0 10px 10px;
+}
+.zoom-controls .btn-small { min-width: 44px; }
+
+/* provenance pages (§9.5) */
+.pages-row { display: flex; gap: 14px; flex-wrap: wrap; margin: 10px 0; }
+.prov-page { position: relative; width: max-content; }
+.prov-page img { display: block; border: 1px solid var(--line); max-width: 100%; }
+.prov-page .overlay-band { position: absolute; }

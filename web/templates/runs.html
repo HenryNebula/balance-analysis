@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Runs · statementledger{% endblock %}
+{% block content %}
+<h1>Distill runs</h1>
+<p class="page-sub">One active run at a time (bounded LLM spend). Runs are
+minutes-long and cost money; cancel is always one click away in the run view.</p>
+<table class="table">
+  <thead><tr><th>Run</th><th>Account</th><th>Mode</th><th>Status</th><th>Created</th><th>Ended</th><th>Parser</th></tr></thead>
+  <tbody>
+    {% for run in runs %}
+    <tr>
+      <td class="mono"><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
+      <td><a href="/accounts/{{ run.account_slug }}">{{ run.account_slug }}</a></td>
+      <td>{{ run.mode }}{% if run.attach %} (attach){% endif %}</td>
+      <td>
+        {% if run.status == 'running' %}<span class="chip chip-key">▶ running</span>
+        {% elif run.status == 'converged' %}<span class="chip chip-ok">✓ converged</span>
+        {% elif run.status == 'cancelled' %}<span class="chip chip-muted">cancelled</span>
+        {% elif run.status == 'orphaned' %}<span class="chip chip-warn">orphaned</span>
+        {% elif run.status == 'cancelling' %}<span class="chip chip-warn">cancelling…</span>
+        {% else %}<span class="chip chip-fail">✗ failed</span>{% endif %}
+      </td>
+      <td>{{ run.created_at|dt }}</td>
+      <td>{{ run.ended_at|dt if run.ended_at else '—' }}</td>
+      <td class="mono">{{ run.converged_key or '—' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="empty">No runs — launch one from a failed statement.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

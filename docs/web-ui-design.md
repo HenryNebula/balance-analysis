@@ -1,6 +1,9 @@
 # statementledger web UI — design
 
-Status: design (no implementation). Date: 2026-10-09.
+Status: implemented (Phases 1–3, 2026-10-09). The phased plan in §11 is
+complete: `web/` + `tests/test_web.py` against the real fixtures; the
+provenance convention of §9.5 is implemented UI-side (degrades gracefully)
+but not yet adopted by any registry module. Date: 2026-10-09.
 
 A local, single-user web UI over the existing `statementledger` library: users
 upload statement PDFs into **accounts** (one folder per account on disk),
