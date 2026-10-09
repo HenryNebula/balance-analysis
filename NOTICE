@@ -1,0 +1,27 @@
+NOTICE — attributions
+=====================
+
+This project builds on ideas and code borrowed from transtractor
+(MIT, Copyright 2025 Daniel Weber — https://crates.io/crates/transtractor):
+
+- src/statementledger/frames.py is a faithful Python port of transtractor's
+  pdf_to_text_items / text_items_to_layout pipeline (word extraction with
+  pdfplumber x/y tolerances, the dynamic y1-bin line-assignment system,
+  same-line item merging, the page/y/x canonical sort). Verified
+  item-for-item against the rust engine's layout dumps on its reference
+  fixtures.
+- The synthetic test fixtures (tools/fixtures/gen_fixtures.py) borrow the
+  STRUCTURAL ideas of transtractor's synthetic fixtures — label-beside-value
+  headers, multi-page tables with repeated page furniture, wrapped
+  description rows, date-less and balance-less rows, table-stop footers —
+  with fictional banks and generated content of our own.
+- The ledger-verification principle (a statement is a ledger; opening +
+  signed amounts must equal closing; printed running balances and section
+  totals must track) is transtractor's core insight, carried forward.
+
+transtractor's own word-extraction floor is pdfsink-rs (MIT,
+https://crates.io/crates/pdfsink-rs), a Rust library that explicitly mirrors
+pdfplumber's extraction semantics — which is why pdfplumber
+(MIT, https://github.com/jsvine/pdfplumber) is this package's single
+runtime dependency and the frames produced here are drop-in compatible
+with what transtractor produced.
