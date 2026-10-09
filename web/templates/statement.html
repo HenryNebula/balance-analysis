@@ -32,8 +32,16 @@
 <div class="toolbar">
   {% if ledger %}
   <span class="text-muted">parser <code>{{ ledger._key }}</code></span>
+  <a class="btn" href="/accounts/{{ account.slug }}/statements/{{ meta.id }}/ledger.json">ledger.json</a>
+  <a class="btn" href="/accounts/{{ account.slug }}/statements/{{ meta.id }}/ledger.csv">ledger.csv</a>
   {% endif %}
   <a class="btn" href="{{ pdf_rel }}">open original.pdf</a>
+  {% if meta.status == 'failed' %}
+  <button class="btn" title="try every registered parser again — new registry modules are picked up live"
+          hx-post="/accounts/{{ account.slug }}/probe"
+          hx-vals='{"statement_id": "{{ meta.id }}"}'
+          hx-target="#probe-slot">Re-probe parsers</button>
+  {% endif %}
   <form method="post" action="/accounts/{{ account.slug }}/statements/{{ meta.id }}/parse" class="inline-form">
     <input type="hidden" name="back_to" value="/accounts/{{ account.slug }}/statements/{{ meta.id }}">
     <button class="btn" type="submit">re-parse</button>
@@ -42,6 +50,7 @@
           hx-confirm="Delete this statement?"
           hx-on::after-request="window.location='/accounts/{{ account.slug }}'">delete</button>
 </div>
+<div id="probe-slot"></div>
 
 {% if ledger %}
 <table class="table table-ledger">

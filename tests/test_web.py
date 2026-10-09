@@ -273,3 +273,207 @@ def test_two_accounts_same_pdf_allowed(client):
     create(client, "Blue Lantern Again")
     assert upload(client, "blue-lantern-savings", BLUE).status_code == 201
     assert upload(client, "blue-lantern-again", BLUE).status_code == 201
+
+
+# --- Phase 2: probe, re-parse-all, exports, chain/overlap -------------------
+
+
+def test_probe_stored_statement_nothing_persisted(client, tmp_path):
+    create(client, "Blue Lantern Savings", key=COPPER_KEY)
+    sid = upload(client, "blue-lantern-savings", BLUE).json()["id"]
+    response = client.post("/accounts/blue-lantern-savings/probe",
+                           json={"statement_id": sid}, headers=JSON)
+    assert response.status_code == 200
+    body = response.json()
+    by_key = {row["key"]: row for row in body["results"]}
+    assert set(by_key) == set(sl_keys())
+    assert by_key[BLUE_KEY]["ok"] and by_key[BLUE_KEY]["rows"] > 0
+    assert not by_key[COPPER_KEY]["ok"]
+    assert body["verified_count"] == 1
+    assert body["suggested_key"] == BLUE_KEY
+    # a probe never touches the store
+    meta = json.loads(statement_dir(tmp_path, sid, "blue-lantern-savings")
+                      .joinpath("meta.json").read_text())
+    assert meta["status"] == "failed"
+    assert len(meta["history"]) == 1
+
+
+def sl_keys():
+    import statementledger as sl
+    return sl.keys()
+
+
+def statement_dir(tmp_path, sid, slug="blue-lantern-savings"):
+    return (tmp_path / "data" / "accounts" / slug / "statements" / sid)
+
+
+def test_probe_uploaded_file(client, tmp_path):
+    create(client, "Probe Account")
+    with open(BLUE, "rb") as handle:
+        response = client.post(
+            "/accounts/probe-account/probe",
+            files={"file": ("x.pdf", handle, "application/pdf")},
+            headers=JSON)
+    assert response.status_code == 200
+    assert response.json()["suggested_key"] == BLUE_KEY
+    assert not list((tmp_path / "data" / "accounts" / "probe-account"
+                     / "statements").glob("*"))  # nothing stored
+
+
+def test_probe_bad_payloads(client):
+    create(client, "Blue Lantern Savings")
+    assert client.post("/accounts/blue-lantern-savings/probe",
+                       json={}, headers=JSON).status_code == 400
+    assert client.post("/accounts/blue-lantern-savings/probe",
+                       json={"statement_id": "0" * 16},
+                       headers=JSON).status_code == 404
+    with open(BLUE, "rb") as handle:
+        assert client.post(
+            "/accounts/blue-lantern-savings/probe",
+            files={"file": ("x.pdf", b"not a pdf", "application/pdf")},
+            headers=JSON).status_code == 400
+
+
+def test_probe_fragment_has_pin_picker(client):
+    create(client, "Blue Lantern Savings", key=COPPER_KEY)
+    sid = upload(client, "blue-lantern-savings", BLUE).json()["id"]
+    page = client.post("/accounts/blue-lantern-savings/probe",
+                       json={"statement_id": sid},
+                       headers={"hx-request": "true"})
+    assert "Pin to" in page.text and BLUE_KEY in page.text
+
+
+def test_reparse_all_report(client):
+    create(client, "Blue Lantern Savings", key=COPPER_KEY)
+    upload(client, "blue-lantern-savings", BLUE)  # fails (wrong pin)
+    client.post("/accounts/blue-lantern-savings/key",
+                data={"registry_key": BLUE_KEY}, headers=JSON)
+    response = client.post("/accounts/blue-lantern-savings/reparse",
+                           headers=JSON)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    entry = body["results"][0]
+    assert entry["old"]["status"] == "failed"
+    assert entry["new"]["status"] == "parsed"
+    assert entry["changed"]
+
+    again = client.post("/accounts/blue-lantern-savings/reparse",
+                        headers=JSON).json()
+    assert again["results"][0]["changed"] is False  # stable re-parse
+
+
+def test_reparse_all_requires_pin(client):
+    create(client, "Blue Lantern Savings")
+    response = client.post("/accounts/blue-lantern-savings/reparse",
+                           headers=JSON)
+    assert response.status_code == 400
+
+
+def test_statement_exports(client):
+    create(client, "Blue Lantern Savings")
+    sid = upload(client, "blue-lantern-savings", BLUE).json()["id"]
+    ledger_response = client.get(
+        f"/accounts/blue-lantern-savings/statements/{sid}/ledger.json")
+    assert ledger_response.status_code == 200
+    exported = ledger_response.json()  # the canonical dict, verbatim
+    assert exported["_key"] == BLUE_KEY
+    assert exported["transactions"]
+
+    csv_response = client.get(
+        f"/accounts/blue-lantern-savings/statements/{sid}/ledger.csv")
+    assert csv_response.status_code == 200
+    assert csv_response.headers["content-type"].startswith("text/csv")
+    lines = csv_response.text.strip().splitlines()
+    assert lines[0] == "date,description,amount,balance"
+    assert len(lines) - 1 == len(exported["transactions"])
+
+
+def test_export_not_parsed_409(client):
+    # pin an account to the wrong parser so the stored statement never parses
+    create(client, "Fail Account", key=COPPER_KEY)
+    with open(BLUE, "rb") as handle:
+        outcome = client.post("/accounts/fail-account/statements",
+                              files={"file": ("b.pdf", handle,
+                                              "application/pdf")},
+                              headers=JSON).json()
+    assert outcome["status"] == "failed"
+    for ext in ("json", "csv"):
+        response = client.get(
+            f"/accounts/fail-account/statements/{outcome['id']}/ledger.{ext}")
+        assert response.status_code == 409
+
+
+def test_merged_account_ledger(client):
+    create(client, "Blue Lantern Savings")
+    sid_blue = upload(client, "blue-lantern-savings", BLUE).json()["id"]
+    sid_copper = upload(client, "blue-lantern-savings", COPPER).json()["id"]
+    merged = client.get("/accounts/blue-lantern-savings/ledger.json").json()
+    assert {s["id"] for s in merged["statements"]} == {sid_blue, sid_copper}
+    txns = merged["transactions"]
+    assert len(txns) == 14 + copper_txn_count()
+    dates = [t["date"] for t in txns if t["date"]]
+    assert dates == sorted(dates)  # (date, statement) order
+    ids = {t["statement_id"] for t in txns}
+    assert ids == {sid_blue, sid_copper}
+
+
+def copper_txn_count():
+    truth = json.loads((FIXTURES / "copperkettle_checking.truth.json")
+                       .read_text())
+    return len(truth["transactions"])
+
+
+def test_chain_and_overlap_on_account_page(client):
+    create(client, "Blue Lantern Savings")
+    upload(client, "blue-lantern-savings", BLUE)
+    upload(client, "blue-lantern-savings", COPPER)
+    page = client.get("/accounts/blue-lantern-savings")
+    merged = client.get("/accounts/blue-lantern-savings/ledger.json").json()
+    statements = merged["statements"]  # period order, like the page
+    breaks = 0
+    ledgers = {}
+    for s in statements:
+        sid = s["id"]
+        ledgers[sid] = client.get(
+            f"/accounts/blue-lantern-savings/statements/{sid}"
+            "/ledger.json").json()
+    for prev, nxt in zip(statements, statements[1:]):
+        if abs(ledgers[prev["id"]]["closing_balance"]
+               - ledgers[nxt["id"]]["opening_balance"]) > 0.01:
+            breaks += 1
+    links = max(len(statements) - 1, 0)
+    if breaks == 0 and links:
+        assert f"chain ✓ ({links}/{links} links)" in page.text
+    else:
+        assert "chain break" in page.text
+
+
+def test_chain_pure_function():
+    from web import ledger
+
+    def meta(sid, start, end, opening, closing):
+        return {"id": sid, "status": "parsed",
+                "period": {"start": start, "end": end},
+                "summary": {"opening_balance": opening,
+                            "closing_balance": closing}}
+
+    metas = [meta("a", "2026-01-01", "2026-01-31", 100.0, 150.0),
+             meta("b", "2026-02-04", "2026-02-28", 150.0, 90.0),
+             meta("c", "2026-02-25", "2026-03-31", 90.0, 60.0)]
+    chain = ledger.chain(metas, tol=0.01)
+    assert (chain["total"], chain["ok"]) == (2, 2)
+    # b starts 3 days after a ends (gap); c starts inside b (overlap 4 days)
+    assert ledger.period_warnings(metas) == [
+        {"id": "b", "kind": "gap", "days": 3},
+        {"id": "c", "kind": "overlap", "days": 4}]
+
+    metas[1]["summary"]["opening_balance"] = 151.0  # break the chain
+    chain = ledger.chain(metas, tol=0.01)
+    assert chain["ok"] == 1 and chain["breaks"][0]["from_id"] == "a"
+
+    csv_text = ledger.to_csv({"transactions": [
+        {"date": "2026-01-02", "description": "Cafe, 'quotes'", "amount": -4.5,
+         "balance": 95.5}]})
+    assert csv_text.splitlines()[1] == ('2026-01-02,"Cafe, \'quotes\'",'
+                                        '-4.50,95.50')

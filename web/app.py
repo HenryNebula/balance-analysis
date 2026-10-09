@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -33,8 +34,10 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                RedirectResponse, Response)
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from web import parsing
+from web import ledger, parsing
 from web.store import AccountExists, DuplicateStatement, Store
 
 MAX_MB_DEFAULT = 25
@@ -115,6 +118,7 @@ def create_app(data_root: Path | None = None,
                 "ledger": (store.statement_ledger(account["slug"],
                                                   latest["id"])
                            if latest else None),
+                "chain": ledger.chain(metas, sl.TOL),
                 "updated": max((m["uploaded_at"] for m in metas),
                                default=None)})
         rows.sort(key=lambda r: r["account"]["display_name"].lower())
@@ -164,9 +168,12 @@ def create_app(data_root: Path | None = None,
     @app.get("/accounts/{slug}", response_class=HTMLResponse)
     def account_detail(slug: str, request: Request):
         account = require_account(slug)
-        return render("account.html", request, account=account,
-                      metas=store.statements(slug), ledger=_latest_ledger(slug),
-                      keys=sl.keys(), outcome=None, error=None)
+        metas = store.statements(slug)
+        return render("account.html", request, account=account, metas=metas,
+                      ledger=_latest_ledger(slug), keys=sl.keys(),
+                      outcome=None, error=None,
+                      chain=ledger.chain(metas, sl.TOL),
+                      warnings=ledger.period_warnings(metas))
 
     @app.delete("/accounts/{slug}")
     def delete_account(slug: str, request: Request):
@@ -181,10 +188,13 @@ def create_app(data_root: Path | None = None,
         def fail(status: int, message: str):
             if wants_json(request):
                 return JSONResponse({"detail": message}, status_code=status)
+            metas = store.statements(slug)
             return render("account.html", request, status=status,
-                          account=account, metas=store.statements(slug),
+                          account=account, metas=metas,
                           ledger=_latest_ledger(slug), keys=sl.keys(),
-                          outcome=None, error=message)
+                          outcome=None, error=message,
+                          chain=ledger.chain(metas, sl.TOL),
+                          warnings=ledger.period_warnings(metas))
 
         key = registry_key.strip() or None
         if key is not None and key not in sl.keys():
@@ -231,6 +241,10 @@ def create_app(data_root: Path | None = None,
     def _statements_region(request: Request, slug: str, outcome: dict,
                            status: int):
         if wants_json(request):
+            if "report" in outcome:  # re-parse-all: one report, not per-file
+                return JSONResponse(
+                    {"status": "ok", "changed": outcome["changed"],
+                     "results": outcome["report"]}, status_code=status)
             statement = outcome["statement"]
             body = {"status": outcome["kind"], "id": statement["id"],
                     "period": statement["period"],
@@ -240,10 +254,11 @@ def create_app(data_root: Path | None = None,
                 if outcome.get(extra) is not None:
                     body[extra] = outcome[extra]
             return JSONResponse(body, status_code=status)
+        metas = store.statements(slug)
         return render("statements_region.html", request, status=status,
-                      account=store.get_account(slug),
-                      metas=store.statements(slug), outcome=outcome,
-                      ledger=_latest_ledger(slug))
+                      account=store.get_account(slug), metas=metas,
+                      outcome=outcome, ledger=_latest_ledger(slug),
+                      warnings=ledger.period_warnings(metas))
 
     @app.post("/accounts/{slug}/statements")
     def upload_statement(slug: str, request: Request,
@@ -253,10 +268,12 @@ def create_app(data_root: Path | None = None,
         def error(status: int, message: str):
             if wants_json(request):
                 return JSONResponse({"detail": message}, status_code=status)
+            metas = store.statements(slug)
             return render("statements_region.html", request, status=status,
-                          account=account, metas=store.statements(slug),
+                          account=account, metas=metas,
                           outcome={"kind": "error", "message": message},
-                          ledger=_latest_ledger(slug))
+                          ledger=_latest_ledger(slug),
+                          warnings=ledger.period_warnings(metas))
 
         if file is None or not file.filename:
             return error(400, "No file was uploaded.")
@@ -329,6 +346,109 @@ def create_app(data_root: Path | None = None,
         require_account(slug)
         store.delete_statement(slug, sid)
         return Response(status_code=204)
+
+    # -- probe / re-parse-all / exports (Phase 2, §7.3–§7.4) -----------------
+
+    @app.post("/accounts/{slug}/probe")
+    async def probe(slug: str, request: Request):
+        """Dry-run try-all: an uploaded PDF or an already-stored statement,
+        nothing persisted (§7.3). Answers 'what would happen?' — per-key
+        verdicts plus the verified set (a picker when ambiguous)."""
+        account = require_account(slug)
+        sid = ""
+        content = b""
+        if request.headers.get("content-type", "").startswith(
+                "application/json"):
+            payload = await request.json()
+            sid = str(payload.get("statement_id") or "")
+        else:
+            form = await request.form()
+            sid = str(form.get("statement_id") or "")
+            upload = form.get("file")
+            if isinstance(upload, StarletteUploadFile):
+                content = await upload.read()
+        if not content and not sid:
+            raise HTTPException(400, "provide a file or a statement_id")
+        if content:
+            if not content or len(content) > max_bytes:
+                raise HTTPException(413, "file empty or over the size limit")
+            if b"%PDF-" not in content[:1024]:
+                raise HTTPException(400, "not a PDF (magic bytes missing)")
+            with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
+                tmp.write(content)
+                tmp.flush()
+                outcome = await run_in_threadpool(parsing.probe_all,
+                                                  Path(tmp.name))
+        else:
+            if not store.statement_exists(slug, sid):
+                raise HTTPException(404, f"no statement {sid!r} in {slug!r}")
+            outcome = await run_in_threadpool(
+                parsing.probe_all, store.original_pdf(slug, sid))
+        verified = outcome["verified_keys"]
+        suggested = verified[0] if len(verified) == 1 else None
+        if wants_json(request):
+            return {"results": outcome["results"],
+                    "verified_count": len(verified),
+                    "suggested_key": suggested, "note": outcome["note"]}
+        return render("probe.html", request, account=account,
+                      results=outcome["results"], verified=verified,
+                      suggested=suggested, note=outcome["note"])
+
+    @app.post("/accounts/{slug}/reparse")
+    def reparse_all(slug: str, request: Request):
+        """Re-parse every stored statement with the pinned key; each entry
+        reports old→new (status, period, summary) and any drift is flagged
+        loudly (§7.4)."""
+        account = require_account(slug)
+        if not account.get("registry_key"):
+            raise HTTPException(400, "pin a parser key first (the account is "
+                                     "in detection mode)")
+        report = []
+        with store.account_lock(slug):
+            account = store.get_account(slug)  # re-read under the lock
+            key = account["registry_key"]
+            for meta in store.statements(slug):
+                sid = meta["id"]
+                result = parsing.probe(store.original_pdf(slug, sid), [key])
+                if result["ok"]:
+                    new_meta = store.save_parsed(slug, sid, result["stmt"],
+                                                 key, sl.__version__)
+                else:
+                    new_meta = store.save_failed(slug, sid,
+                                                 result["attempts"],
+                                                 result["note"])
+                report.append(ledger.drift(meta, new_meta))
+        outcome = {"kind": "report", "key": key, "report": report,
+                   "changed": any(entry["changed"] for entry in report)}
+        return _statements_region(request, slug, outcome, 200)
+
+    @app.get("/accounts/{slug}/statements/{sid}/ledger.json")
+    def statement_ledger_json(slug: str, sid: str, request: Request):
+        require_account(slug)
+        stmt = store.statement_ledger(slug, sid)
+        if stmt is None:
+            raise HTTPException(409, "statement not parsed yet")
+        return JSONResponse(stmt)
+
+    @app.get("/accounts/{slug}/statements/{sid}/ledger.csv")
+    def statement_ledger_csv(slug: str, sid: str, request: Request):
+        require_account(slug)
+        stmt = store.statement_ledger(slug, sid)
+        if stmt is None:
+            raise HTTPException(409, "statement not parsed yet")
+        return Response(ledger.to_csv(stmt), media_type="text/csv",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{sid}.csv"'})
+
+    @app.get("/accounts/{slug}/ledger.json")
+    def account_ledger_json(slug: str, request: Request):
+        """Merged ledger across every parsed statement (transactions in
+        (date, statement) order, each tagged with its statement id)."""
+        account = require_account(slug)
+        metas = store.statements(slug)
+        ledgers = {m["id"]: store.statement_ledger(slug, m["id"])
+                   for m in metas if m["status"] == "parsed"}
+        return JSONResponse(ledger.merged(account, metas, ledgers))
 
     # -- registry ------------------------------------------------------------
 

@@ -7,6 +7,10 @@
     <div class="page-sub">
       {% if ledger %}account {{ ledger.account_number|mask }} · {% endif %}
       {{ metas|length }} statement{{ '' if metas|length == 1 else 's' }}
+      {% if chain.total %}
+        · {% if chain.breaks %}<span class="chip chip-fail">⚠ chain break: closing {{ chain.breaks[0].prev_closing|money }} ≠ next opening {{ chain.breaks[0].next_opening|money }}</span>
+           {% else %}<span class="chip chip-ok">chain ✓ ({{ chain.ok }}/{{ chain.total }} links)</span>{% endif %}
+      {% endif %}
       {% if account.registry_key_source %} · pin source: {{ account.registry_key_source }}{% endif %}
     </div>
   </div>
@@ -40,6 +44,11 @@
 {% include "statements_region.html" %}
 
 <div class="row-end">
+  {% if account.registry_key %}
+  <button class="btn" title="sequential per-statement parse with the pinned key; reports old→new drift"
+          hx-post="/accounts/{{ account.slug }}/reparse"
+          hx-target="#statements-region" hx-swap="outerHTML">Re-parse all with ◇ {{ account.registry_key }}</button>
+  {% endif %}
   <button class="btn btn-danger" hx-delete="/accounts/{{ account.slug }}" hx-confirm="Delete {{ account.display_name }} and every stored statement in it?">Delete account</button>
 </div>
 {% endblock %}

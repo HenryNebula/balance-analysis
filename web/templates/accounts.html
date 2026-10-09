@@ -21,6 +21,7 @@
       {{ row.metas|length }} statement{{ '' if row.metas|length == 1 else 's' }}{% if row.metas %}
         · {{ row.metas|length - row.parsed - row.failed }} unparsed
         · {{ row.parsed }} parsed{% if row.failed %} · <span class="text-warn">{{ row.failed }} need attention</span>{% endif %}
+        {% if row.chain.total %} · {% if row.chain.breaks %}<span class="text-warn">⚠ chain break</span>{% else %}chain ✓ ({{ row.chain.ok }}/{{ row.chain.total }} links){% endif %}{% endif %}
         · updated {{ row.updated|dt }}{% endif %}
       {% if row.latest %}
       <div class="card-meta">latest closing {{ row.latest.summary.closing_balance|money }}

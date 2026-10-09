@@ -30,6 +30,49 @@ def _error_text(error: BaseException) -> str:
     return " ".join(parts)
 
 
+def _frames_or_note(pdf: Path) -> tuple[list[dict], str]:
+    """Extract frames for one PDF; on failure return the plain-language
+    blocker instead of a pdfplumber traceback (§10)."""
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = sl.frames_for([Path(pdf)], Path(tmp))
+    except Exception as error:  # noqa: BLE001 - surfaced as data, not a 500
+        text = _error_text(error)
+        if any(marker in text for marker in ENCRYPTED_MARKERS):
+            return [], ("The PDF is encrypted/password-protected — export an "
+                        "unencrypted copy from the bank and upload that.")
+        return [], (f"Could not extract text from the PDF ({text[:200]}). "
+                    "If it is damaged, tools/heal_pdf.py may recover it.")
+    statements = frames["statements"]
+    if not statements or not statements[0].get("lines"):
+        return [], "No extractable text — is this a scanned image PDF?"
+    return statements, ""
+
+
+def _evaluate_all(statements: list[dict], candidates: list[str]):
+    """Every candidate's verdict over the (already extracted) frames:
+    per-key results and the list of verified keys."""
+    results: list[dict] = []
+    verified: list[str] = []
+    for key in candidates:
+        try:
+            module = sl.load_module(key)
+        except Exception as error:  # noqa: BLE001 - a broken registry module
+            results.append({"key": key, "ok": False, "rows": 0,
+                            "error": f"registry: {type(error).__name__}: "
+                                     f"{error}"[:400]})
+            continue
+        verdict = sl.evaluate(module.parse, statements, key=key)
+        ok = verdict["verified"]
+        results.append({"key": key, "ok": ok,
+                        "rows": verdict["results"][0]["rows"],
+                        "error": "" if ok else
+                        verdict["results"][0]["error"]})
+        if ok:
+            verified.append(key)
+    return results, verified
+
+
 def probe(pdf: Path, candidates: list[str]) -> dict:
     """Try each candidate parser key against the PDF.
 
@@ -40,48 +83,31 @@ def probe(pdf: Path, candidates: list[str]) -> dict:
     - verified_keys: every key that verified (detection mode must know when
       the match is ambiguous — never auto-pin then, §7.2)
     """
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            frames = sl.frames_for([Path(pdf)], Path(tmp))
-    except Exception as error:  # noqa: BLE001 - surfaced as data, not a 500
-        text = _error_text(error)
-        if any(marker in text for marker in ENCRYPTED_MARKERS):
-            note = ("The PDF is encrypted/password-protected — export an "
-                    "unencrypted copy from the bank and upload that.")
-        else:
-            note = (f"Could not extract text from the PDF ({text[:200]}). "
-                    "If it is damaged, tools/heal_pdf.py may recover it.")
+    statements, note = _frames_or_note(pdf)
+    if not statements:
         return {"ok": False, "key": None, "stmt": None, "attempts": [],
                 "note": note, "verified_keys": []}
 
-    statements = frames["statements"]
-    if not statements or not statements[0].get("lines"):
-        return {"ok": False, "key": None, "stmt": None, "attempts": [],
-                "note": "No extractable text — is this a scanned image PDF?",
-                "verified_keys": []}
-
-    attempts: list[dict] = []
-    verified_keys: list[str] = []
+    results, verified_keys = _evaluate_all(statements, candidates)
+    attempts = [{"key": r["key"], "error": r["error"]}
+                for r in results if not r["ok"]]
     stmt = None
-    for key in candidates:
-        try:
-            module = sl.load_module(key)
-        except Exception as error:  # noqa: BLE001 - a broken registry module
-            attempts.append({"key": key,
-                             "error": f"registry: {type(error).__name__}: "
-                                      f"{error}"[:400]})
-            continue
-        verdict = sl.evaluate(module.parse, statements, key=key)
-        if verdict["verified"]:
-            verified_keys.append(key)
-            if stmt is None:  # first-verified-wins, same rule as sl.parse
-                stmt = module.parse(statements[0])
-                stmt["_key"] = key
-        else:
-            attempts.extend({"key": key, "error": result["error"]}
-                            for result in verdict["results"])
+    if verified_keys:  # first-verified-wins, same rule as sl.parse
+        module = sl.load_module(verified_keys[0])
+        stmt = module.parse(statements[0])
+        stmt["_key"] = verified_keys[0]
     return {"ok": stmt is not None, "key": stmt and stmt["_key"], "stmt": stmt,
             "attempts": attempts, "note": "", "verified_keys": verified_keys}
+
+
+def probe_all(pdf: Path) -> dict:
+    """Dry-run try-all (§7.3): per-key {key, ok, rows, error} results and the
+    verified keys, with nothing parsed-and-kept or persisted."""
+    statements, note = _frames_or_note(pdf)
+    if not statements:
+        return {"results": [], "verified_keys": [], "note": note}
+    results, verified = _evaluate_all(statements, sl.keys())
+    return {"results": results, "verified_keys": verified, "note": ""}
 
 
 def candidates_for(account: dict) -> list[str]:

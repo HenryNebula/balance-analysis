@@ -18,8 +18,14 @@
   </div>
   {% elif outcome.ambiguous %}
   <div class="banner-action text-warn">
-    {{ outcome.ambiguous|length }} parsers verified this statement ({{ outcome.ambiguous|join(', ') }}).
-    Parsed with the first; the account stays unpinned — pick a parser under “change” above.
+    {{ outcome.ambiguous|length }} parsers verified this statement. Parsed with
+    the first; the account stays unpinned — pin the one this bank is:
+    {% for key in outcome.ambiguous %}
+    <form method="post" action="/accounts/{{ account.slug }}/key" class="inline-form">
+      <input type="hidden" name="registry_key" value="{{ key }}">
+      <button type="submit" class="btn btn-small">{{ key }}</button>
+    </form>
+    {% endfor %}
   </div>
   {% endif %}
 </div>
@@ -43,6 +49,14 @@
     <div>Register a new parser with the distill harness (needs STATEMENTLEDGER_LLM_* in .env — see .env.example):</div>
     <pre>$ uv run python tools/distill_harness.py {{ outcome.pdf_rel }} --max-probes 8</pre>
   </div>
+  <div class="banner-action">
+    <button class="btn btn-small" title="try every registered parser again — new registry modules are picked up live"
+            hx-post="/accounts/{{ account.slug }}/probe"
+            hx-vals='{"statement_id": "{{ outcome.statement.id }}"}'
+            hx-target="next .probe-slot">Re-probe parsers</button>
+    <a class="btn btn-small" href="/accounts/{{ account.slug }}/statements/{{ outcome.statement.id }}">view</a>
+  </div>
+  <div class="probe-slot"></div>
 </div>
 
 {% elif outcome.kind == 'duplicate' %}
@@ -51,6 +65,25 @@
   — same file (sha256) as {{ outcome.statement.original_filename }}
   ({{ outcome.statement.uploaded_at|dt }}{% if outcome.statement.status == 'parsed' %}, parsed{% elif outcome.statement.status == 'failed' %}, parse failed{% else %}, unparsed{% endif %}).
   <a class="btn btn-small" href="/accounts/{{ account.slug }}/statements/{{ outcome.statement.id }}">view existing</a>
+</div>
+
+{% elif outcome.kind == 'report' %}
+<div class="banner {{ 'banner-warn' if outcome.changed else 'banner-ok' }}">
+  <strong>{% if outcome.changed %}⚠ Re-parsed with drift — review{% else %}✓ Re-parsed{% endif %}</strong>
+  · {{ outcome.report|length }} statement{{ '' if outcome.report|length == 1 else 's' }} with <code>{{ outcome.key }}</code>
+  <table class="table table-tight">
+    <thead><tr><th>Statement</th><th>Old</th><th>New</th><th></th></tr></thead>
+    <tbody>
+      {% for entry in outcome.report %}
+      <tr>
+        <td class="mono"><a href="/accounts/{{ account.slug }}/statements/{{ entry.id }}">{{ entry.id }}</a></td>
+        <td class="text-muted">{% if entry.old.summary %}{{ entry.old.status }} · {{ entry.old.period|period }} · {{ entry.old.summary.transactions }} txns · {{ entry.old.summary.closing_balance|money }}{% else %}{{ entry.old.status or '—' }}{% endif %}</td>
+        <td>{% if entry.new.summary %}{{ entry.new.status }} · {{ entry.new.period|period }} · {{ entry.new.summary.transactions }} txns · {{ entry.new.summary.closing_balance|money }}{% else %}{{ entry.new.status }}{% endif %}</td>
+        <td>{% if entry.changed %}<span class="chip chip-warn">changed</span>{% else %}<span class="chip chip-muted">same</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>
 
 {% elif outcome.kind == 'error' %}

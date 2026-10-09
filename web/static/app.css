@@ -86,6 +86,7 @@ a { color: var(--accent); }
 .banner-fail code { color: var(--fail); }
 .banner-warn { background: var(--warn-bg); border-color: #ecd9ac; color: var(--warn); }
 .banner-error { background: var(--fail-bg); border-color: #f0c8c3; color: var(--fail); }
+.banner-probe { background: #eef3fe; border-color: #c9d6f5; color: #2c3e66; }
 .banner-action { margin-top: 8px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .banner .table { background: var(--card); }
 .banner .cli pre {

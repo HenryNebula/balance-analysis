@@ -20,6 +20,9 @@
           {% if m.status == 'parsed' %}<span class="chip chip-ok">✓ parsed</span>
           {% elif m.status == 'failed' %}<span class="chip chip-fail">✗ no parser verified</span>
           {% else %}<span class="chip chip-muted">◻ unparsed</span>{% endif %}
+          {% for w in warnings %}{% if w.id == m.id %}
+            <span class="chip chip-warn" title="{{ 'overlaps the previous statement' if w.kind == 'overlap' else 'gap after the previous statement' }} (warn only — banks reissue corrected periods)">⚠ {{ w.kind }} {{ w.days }}d</span>
+          {% endif %}{% endfor %}
         </td>
         <td class="td-actions">
           <a class="btn btn-small" href="/accounts/{{ account.slug }}/statements/{{ m.id }}">view</a>
