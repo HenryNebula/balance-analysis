@@ -163,6 +163,13 @@ PY_CONTRACT = """Contract for every response:
   crash; the harness feeds the exact traceback back to you.
 - Literals only for label terms / column header words — never for printed
   amounts, dates, or transaction descriptions.
+- READ amounts from the statement's amount/activity columns. NEVER compute
+  an amount from balances (closing - opening, balance-to-balance deltas):
+  that reconciles by construction — a tautology the gate cannot see, and
+  a parser shipping it is a false verification. If the statement prints
+  activity totals ("Total Deposits", "Deposits", "Withdrawals", ...), you
+  MUST bind them into totals[] — the independent sums that catch derived
+  amounts, dropped rows, and sign flips end-to-end reconcile cannot see.
 - BURNER PROBES: to just LOOK before committing, first line exactly
   "# probe" (print anything). Probes are discarded and uncapped, but they
   cannot converge the run; from 90% of turns used onward you are warned.
