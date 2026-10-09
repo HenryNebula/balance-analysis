@@ -27,6 +27,9 @@ Usage (from balance-analysis/):
     uv run python distill_harness.py statement1.pdf [statement2.pdf ...]
     uv run python distill_harness.py --script canned_probe.py stmt.pdf
     uv run python distill_harness.py --py stmt1.pdf [stmt2.pdf ...]  # pyledger
+    uv run python distill_harness.py --py --key us__bank__prod__1 old.pdf new.pdf
+        # MAINTAIN: evolve the registered parser until ALL statements verify
+        # (old ones are the regression set); starts from the registry source
 """
 
 from __future__ import annotations
@@ -486,15 +489,13 @@ print("GATE:" + json.dumps(verdict))
 '''
 
 
-def py_gate(workdir: Path, round_number: int, trace: Trace) -> dict:
-    """The py-mode engine gate: import the round's module in a fresh sandbox
+def py_gate(workdir: Path, stem: str, trace: Trace) -> dict:
+    """The py-mode engine gate: import workdir/<stem>.py in a fresh sandbox
     and run parse() on EVERY statement. Verdict shape matches the config
-    engine's evaluate() so the loop's bookkeeping is unchanged."""
-    gate_name = f"gate_{round_number}"
-    (workdir / f"{gate_name}.py").write_text(
-        GATE_RUNNER.format(candidate=f"round_{round_number}")
-    )
-    outcome = run_script(workdir, gate_name)
+    engine's evaluate() so the loop's bookkeeping is unchanged. Works for
+    round scripts (round_N) and the maintain-mode baseline alike."""
+    (workdir / f"gate_{stem}.py").write_text(GATE_RUNNER.format(candidate=stem))
+    outcome = run_script(workdir, f"gate_{stem}")
     verdict = None
     if outcome["returncode"] == 0:
         match = re.search(r"^GATE:(\{.*\})$", outcome["stdout"], re.M)
@@ -516,7 +517,7 @@ def py_gate(workdir: Path, round_number: int, trace: Trace) -> dict:
                           "cc__bank__product__n, lowercase"),
             })
     trace.log(
-        f"round {round_number} pyledger gate",
+        f"{stem} pyledger gate",
         f"exit {outcome['returncode']}\n{json.dumps(verdict, default=str)}",
     )
     return verdict
@@ -532,6 +533,39 @@ def py_feedback(evaluation: dict) -> str:
             lines.append(f"  {result['name']}: FAILED — {result['error']}")
     return ("pyledger gate (parse() re-run on EVERY statement; schema + "
             "reconcile required):\n" + "\n".join(lines))
+
+
+# --- py maintain mode: evolve a registered parser, never from scratch ---------
+
+MAINTAIN_ADDENDUM = """MAINTENANCE MODE. You are revising an EXISTING registered parser that
+already works for at least one statement. Rules of maintenance:
+- KEY stays exactly as given — never rename, never register a new key.
+- Make the SMALLEST change that fixes the failing statement(s) WITHOUT
+  breaking the passing one(s). The gate runs parse() on EVERY statement;
+  all must verify. Prefer a new fallback branch or a widened condition over
+  a restructure; keep what already works working.
+- Diagnose from the baseline verdict first: it names each failing statement
+  and the exact error (crash hint, schema row, or reconcile divergence).
+  Read it before touching anything.
+- You already hold the layout knowledge in the baseline code; probe (first
+  line '# probe', as always) only what the baseline doesn't explain — e.g.
+  the failing statement's header row, its stop words, its money formats."""
+
+MAINTAIN_TASK_TEMPLATE = """Maintaining the registered parser {key}.
+Statement set: {names}. frames.json in the working directory holds them all
+(first: {name}, {pages} pages, {lines} layout lines).
+
+Baseline verdict (the CURRENT registry code, run on every statement):
+{verdict}
+
+Current registered source:
+```python
+{code}
+```
+
+Tweak it minimally so EVERY statement verifies. Keep KEY = "{key}" exactly.
+Return the complete revised script in one ```python fence; probe first when
+the baseline doesn't explain a failure."""
 
 
 # --- LLM transport (raw code, not json_object) --------------------------------
@@ -908,10 +942,15 @@ def draft_by_repl(
     system_prompt: str = SYSTEM_PROMPT,
     task_template: str = TASK_TEMPLATE,
     engine: str = "config",
+    task_message: str | None = None,
+    require_key: str | None = None,
+    enforce_look_gate: bool = True,
 ) -> tuple[dict | None, bool, list[dict]]:
     """Returns (best artifact or None, verified?, round history). The artifact
     is a config dict (engine='config') or {'key', 'code'} for a pyledger
-    parser module (engine='py')."""
+    parser module (engine='py'). Maintain mode (require_key set) pins KEY to
+    the registered parser being evolved; task_message replaces the drafted
+    task template (it embeds the baseline source and its gate verdict)."""
     if engine == "py":
         import pyledger
 
@@ -941,7 +980,7 @@ def draft_by_repl(
         if canned_script is not None:
             code = canned_script.read_text()
         else:
-            task = task_template.format(
+            task = task_message or task_template.format(
                 name=first["name"],
                 pages=1 + max(line["page"] for line in first["lines"]),
                 lines=len(first["lines"]),
@@ -1016,6 +1055,7 @@ def draft_by_repl(
             not is_probe
             and not commit_mode
             and canned_script is None
+            and enforce_look_gate
             and (probes_done < 1 or not tail_seen)
         ):
             if probes_done < 1:
@@ -1099,6 +1139,21 @@ def draft_by_repl(
             continue
         consecutive_probes = 0
 
+        if engine == "py" and require_key:
+            declared = re.search(r'^KEY\s*=\s*["\']([^"\']+)["\']', code, re.M)
+            if not declared or declared.group(1) != require_key:
+                feedback = (
+                    f"MAINTAIN MODE: KEY must stay {require_key!r}"
+                    + (f", but the script declares {declared.group(1)!r}"
+                       if declared else ", but the script declares none")
+                    + " — you are evolving the registered parser, not "
+                    "registering a new one. Return the corrected script."
+                )
+                messages.append({"role": "user", "content": feedback})
+                history.append({"round": round_number, "outcome": "key renamed"})
+                trace.log(f"round {round_number} rejected", feedback)
+                continue
+
         if engine == "py":
             outcome = run_script(workdir, f"round_{round_number}")
             trace.log(
@@ -1108,7 +1163,7 @@ def draft_by_repl(
             )
             config = None
             if outcome["returncode"] == 0 and "def parse(" in code:
-                evaluation = py_gate(workdir, round_number, trace)
+                evaluation = py_gate(workdir, f"round_{round_number}", trace)
                 if evaluation.get("clean", 0) > 0:
                     config = {"key": evaluation.get("key"), "code": code}
             else:
@@ -1289,7 +1344,17 @@ def main() -> int:
         "(KEY + def parse(frames)), verified by reconciliation on every "
         "statement",
     )
+    cli.add_argument(
+        "--key",
+        default=None,
+        help="py mode only: MAINTAIN the registered parser with this key — "
+        "start from the registry source, not from scratch; the gate requires "
+        "ALL given statements to verify (pass old AND new ones: the old are "
+        "the regression set)",
+    )
     args = cli.parse_args()
+    if args.key and not args.py:
+        cli.error("--key (maintain mode) requires --py")
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     workdir = Path("logs") / f"distill_{stamp}_{args.pdfs[0].stem[:30]}"
@@ -1313,10 +1378,54 @@ def main() -> int:
     else:
         system, template = SYSTEM_PROMPT, TASK_TEMPLATE
 
+    # Maintain mode: stage the registered parser as the baseline, gate it
+    # against the full statement set (old statements = regression set), and
+    # hand the model the source + per-statement verdict as its starting point.
+    task_message = None
+    require_key = None
+    look_gate = True
+    baseline = None
+    if args.py and args.key:
+        import pyledger
+
+        source_path = pyledger.PYREGISTRY / f"{args.key}.py"
+        if not source_path.exists():
+            print(f"no registered parser {args.key!r} in {pyledger.PYREGISTRY}")
+            return 1
+        baseline = source_path.read_text()
+        (workdir / "baseline.py").write_text(baseline)
+        frames, _ = pyledger.frames_for(args.pdfs, workdir)
+        verdict = py_gate(workdir, "baseline", trace)
+        print(
+            "baseline: " + ("VERIFIED" if verdict["verified"] else
+                            f"{verdict['clean']}/{len(args.pdfs)} statements reconcile")
+        )
+        if verdict["verified"]:
+            trace.log("result", "baseline already verifies every statement")
+            print(f"{args.key} already verifies all {len(args.pdfs)} "
+                  "statement(s) — nothing to maintain.")
+            trace.close()
+            return 0
+        first = frames["statements"][0]
+        task_message = MAINTAIN_TASK_TEMPLATE.format(
+            key=args.key,
+            names=", ".join(p.name for p in args.pdfs),
+            name=first["name"],
+            pages=1 + max(line["page"] for line in first["lines"]),
+            lines=len(first["lines"]),
+            verdict=py_feedback(verdict),
+            code=baseline,
+        )
+        system += "\n\n" + MAINTAIN_ADDENDUM
+        require_key = args.key
+        look_gate = False  # the baseline IS the looked-at evidence; probe at will
+
     config, verified, history = draft_by_repl(
         args.pdfs, workdir, args.rounds, trace, canned_script=args.script,
         system_prompt=system, task_template=template,
         engine="py" if args.py else "config",
+        task_message=task_message, require_key=require_key,
+        enforce_look_gate=look_gate,
     )
     if config is None or not verified:
         trace.log("result", f"FAILED ({'no artifact' if config is None else 'not verified'})")
@@ -1329,6 +1438,18 @@ def main() -> int:
     if args.py:
         key = config["key"]
         trace.log("verified parser", config["code"])
+        if baseline is not None:
+            import difflib
+
+            diff = [
+                line for line in difflib.unified_diff(
+                    baseline.splitlines(), config["code"].splitlines(),
+                    lineterm="", n=0)
+                if line[:1] in "+-" and line[:3] not in ("+++", "---")
+            ]
+            print(f"maintained in place: {len(diff)} lines changed "
+                  "(git history is the parser's changelog)")
+            trace.log("maintenance diff", "\n".join(diff[:80]))
         if args.no_save:
             print(f"\nVERIFIED (not saved, --no-save); parser drafted in {workdir}")
         else:
