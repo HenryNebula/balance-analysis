@@ -1,0 +1,41 @@
+You are re-reviewing screenshots of a web UI (round 5; verdicts so far: GA: NO (41) → ACCEPTABLE (12) → ACCEPTABLE (8) → ACCEPTABLE (5)). You are in headless mode — shell commands are denied. Use ONLY the read_file tool (no RunCommand, no shell) on each of these absolute paths before answering:
+
+/tmp/ui-shots-stmtledger/01-accounts-empty.png
+/tmp/ui-shots-stmtledger/02-accounts-list.png
+/tmp/ui-shots-stmtledger/03-account-parsed.png
+/tmp/ui-shots-stmtledger/04-account-pin-picker.png
+/tmp/ui-shots-stmtledger/05-statement-parsed.png
+/tmp/ui-shots-stmtledger/06-statement-failed.png
+/tmp/ui-shots-stmtledger/07-launch-dialog.png
+/tmp/ui-shots-stmtledger/09-upload-outcome-parsed.png
+/tmp/ui-shots-stmtledger/10-upload-duplicate.png
+/tmp/ui-shots-stmtledger/11-registry.png
+/tmp/ui-shots-stmtledger/12-runs-list.png
+/tmp/ui-shots-stmtledger/13-run-view-converged.png
+/tmp/ui-shots-stmtledger/14-run-view-failed-overlay.png
+/tmp/ui-shots-stmtledger/15-account-failed-statement.png
+
+CONTEXT (unchanged): "statementledger" is a local, single-user web tool for bank-statement PDFs: upload into accounts, parse with per-bank "registry parsers" verified by an arithmetic gate, launch supervised LLM "distill runs" for unknown banks (watched live with a PDF overlay). Server-rendered + htmx, one hand-written stylesheet, light theme, a utility where honest state signaling and density beat polish.
+
+WHAT CHANGED SINCE ROUND 4:
+- the account page's embedded runs table headers its action column (ACTIONS) like every other table
+- the run-header status chip now vertically centers with the run title instead of floating above it
+- the timeline highlights the round currently being inspected (accent border + tint); while auto-following, that is always the newest round
+- "Re-parse all (pinned parser)" moved directly under the statements table it targets (inside the live region), away from the runs table and danger zone
+- zoom buttons show an active state; when the page auto-fits to a non-preset zoom, no preset is marked
+
+KEEP-LIST — do not re-flag, they are deliberate:
+1. No currency symbols on amounts: the parsed ledger carries no currency field; a guessed symbol would be wrong. Amounts are bare and locale-neutral.
+2. Registry rows are informational only (no click-through to parser source) — out of scope for now.
+3. No token/cost metrics on runs — the harness does not account tokens; duration is shown instead.
+4. The draft-code pane is plain text by design (no syntax highlighting/line numbers/copy button).
+5. The statement id (hex) is small metadata, not the heading.
+6. The pin-picker/launch popovers intentionally overlay content below them (they are popovers, not inline panels).
+7. Em-dash placeholders (—) in empty numeric cells are right-aligned like the numbers in those columns — standard tabular convention.
+8. When the PDF is auto-fit to a width between presets (e.g. 62%), no zoom button is highlighted — only exact preset matches light up.
+
+YOUR TASK:
+1. NUMERED findings, each with severity (blocker / major / minor / nit), the screenshot filename, and a concrete description. New findings and unresolved earlier issues both count.
+2. End with exactly one verdict: "GA: NO" / "ACCEPTABLE" / "GA: YES".
+
+Be specific and honest; do not invent problems, do not soften real ones.

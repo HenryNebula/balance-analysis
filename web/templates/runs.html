@@ -5,12 +5,12 @@
 <p class="page-sub">One active run at a time (bounded LLM spend). Runs are
 minutes-long and cost money; cancel is always one click away in the run view.</p>
 <table class="table">
-  <thead><tr><th>Run</th><th>Account</th><th>Mode</th><th>Status</th><th>Created</th><th>Ended</th><th>Parser</th></tr></thead>
+  <thead><tr><th>Run</th><th>Account</th><th>Mode</th><th>Status</th><th>Started</th><th>Duration</th><th>Parser</th></tr></thead>
   <tbody>
     {% for run in runs %}
     <tr>
       <td class="mono"><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
-      <td><a href="/accounts/{{ run.account_slug }}">{{ run.account_slug }}</a></td>
+      <td><a href="/accounts/{{ run.account_slug }}" title="{{ run.account_slug }}">{{ run.display_name or run.account_slug }}</a></td>
       <td>{{ run.mode }}{% if run.attach %} (attach){% endif %}</td>
       <td>
         {% if run.status == 'running' %}<span class="chip chip-key">▶ running</span>
@@ -21,7 +21,7 @@ minutes-long and cost money; cancel is always one click away in the run view.</p
         {% else %}<span class="chip chip-fail">✗ failed</span>{% endif %}
       </td>
       <td>{{ run.created_at|dt }}</td>
-      <td>{{ run.ended_at|dt if run.ended_at else '—' }}</td>
+      <td class="num">{{ run.duration or '—' }}</td>
       <td class="mono">{{ run.converged_key or '—' }}</td>
     </tr>
     {% else %}

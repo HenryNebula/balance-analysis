@@ -5,6 +5,55 @@ complete: `web/` + `tests/test_web.py` against the real fixtures; the
 provenance convention of §9.5 is implemented UI-side (degrades gracefully)
 but not yet adopted by any registry module. Date: 2026-10-09.
 
+## UI review log (ui-review-loop, 2026-10-09)
+
+External fresh-eyes reviewer over a fixed screenshot tour (`tools/ui_review/`:
+`run_tour.sh` wipes + reseeds state through the app's own code paths, walks
+15 labeled states with playwright-core + system chromium, `review.sh`
+submits to the headless reviewer). Same tour every round; verdict ladder
+GA: NO → ACCEPTABLE → GA: YES.
+
+| Round | Findings | Verdict |
+|---|---|---|
+| 1 | 41 | GA: NO |
+| 2 | 12 | ACCEPTABLE |
+| 3 | 8 | ACCEPTABLE |
+| 4 | 5 | ACCEPTABLE |
+| 5 | 3 (all nit) | **GA: YES** |
+
+Round 1 paid for the whole loop before the reviewer saw a frame: driving the
+upload through a real browser exposed that htmx matches `responseHandling`
+codes as **regexes** — the `"2xx"` notation from the design doc never matches
+status 201, so **no successful upload ever swapped its outcome card in a
+real browser** (curl-level tests were all green; the fragment was correct,
+the swap was dead). Fixed with `"[23].."`-style codes; row deletes (204 +
+`hx-swap="delete"`) verified in-browser too.
+
+Biggest fixes across rounds: account sub-header (counts, chain) moved inside
+the swap region (stale-count blocker); `chain ✓ (-1/-1 links)` on
+zero-parsed accounts eliminated; the run view's terminal state ends in an
+action (parser saved → N statements parsed → go to account), never a
+contradictory pair of banners; PDF auto-fits the pane so amounts stay
+readable; timeline marks the inspected round; launch/pin are anchored
+popovers with Close; the JS terminal handler no longer stomps semantic
+status colors.
+
+One attempted disprove taught the rule again: the reviewer flagged registry
+numeric columns as left-aligned, the CSS said `.num { text-align: right }` —
+the DOM said left, because `.table td` outranked `.num`. Verified in the DOM
+before ruling, fixed with `.table td.num`.
+
+Keep-list (deliberate, do not re-flag): bare locale-neutral amounts (no
+currency field in the canonical dict — a guessed symbol would lie);
+registry rows informational only; no token/cost metrics (the harness does
+not account tokens — duration shown); draft-code pane plain text; hex
+statement id as small metadata; popovers overlay content below them;
+right-aligned em-dash placeholders in numeric columns.
+
+Residuals (nit, post-verdict polish applied without a re-round): action
+button casing unified to lowercase; launch-form buttons on their own footer
+row. Period-column placeholder alignment left as-is (textual column).
+
 A local, single-user web UI over the existing `statementledger` library: users
 upload statement PDFs into **accounts** (one folder per account on disk),
 statements are parsed with the **registry** (same bank → same parser, zero

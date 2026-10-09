@@ -1,12 +1,14 @@
 {# Upload / re-parse outcome card (docs/web-ui-design.md §6.3) #}
 {% if outcome.kind == 'parsed' %}
 <div class="banner banner-ok">
-  <strong>✓ Parsed</strong>
-  {% if outcome.statement.period %}· {{ outcome.statement.period|period }}{% endif %}
-  · {{ outcome.statement.summary.transactions }} transactions
-  · reconciled (opening {{ outcome.statement.summary.opening_balance|money }} → closing {{ outcome.statement.summary.closing_balance|money }})
-  · parser <code>{{ outcome.key }}</code>
-  <a class="btn btn-small" href="/accounts/{{ account.slug }}/statements/{{ outcome.statement.id }}">view</a>
+  <div class="banner-row">
+    <strong>✓ Parsed</strong>
+    {% if outcome.statement.period %}· {{ outcome.statement.period|period }}{% endif %}
+    · {{ outcome.statement.summary.transactions }} transactions
+    · reconciled ✓ ({{ outcome.statement.summary.opening_balance|money }} → {{ outcome.statement.summary.closing_balance|money }})
+    · parser <code>{{ outcome.key }}</code>
+    <a class="btn btn-small" href="/accounts/{{ account.slug }}/statements/{{ outcome.statement.id }}">view</a>
+  </div>
   {% if outcome.suggest_pin %}
   <div class="banner-action">
     Exactly one parser verified this statement. Pin the account to it so future

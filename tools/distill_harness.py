@@ -1181,7 +1181,8 @@ def main() -> int:
     trace.log("run start", f"mode={mode}\npdfs={[str(p) for p in args.pdfs]}")
     trajectory.emit("run_started", pdfs=[p.name for p in args.pdfs],
                     mode="maintain" if args.key else "draft",
-                    model=(str(args.script) if args.script else MODEL),
+                    model=(f"canned script {args.script.name}"
+                           if args.script else MODEL),
                     rounds=args.rounds)
 
     system = (PY_SYSTEM_PROMPT + "\n\n" + PY_CONTRACT

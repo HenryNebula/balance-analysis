@@ -616,11 +616,23 @@ def test_run_validation_and_lock(run_client, tmp_path, monkeypatch):
     assert first.status_code == 202
     second = _launch(run_client, "blue-lantern-savings", [sid])
     assert second.status_code == 409  # one active run at a time
-    assert _launch(run_client, "blue-lantern-savings", [sid],
-                   mode="maintain").status_code == 400  # maintain needs key
+    create(run_client, "No Pin Account")
+    unpinned = upload(run_client, "no-pin-account", BLUE).json()["id"]
+    assert _launch(run_client, "no-pin-account", [unpinned],
+                   mode="maintain").status_code == 400  # no key to maintain
     assert _launch(run_client, "nope-account", [sid]).status_code == 404
     run_client.delete(f"/runs/{first.json()['run_id']}")
     _wait_terminal(run_client, first.json()["run_id"])
+
+
+def test_launch_maintain_defaults_to_pin(run_client):
+    create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
+    sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
+    response = _launch(run_client, "blue-lantern-savings", [sid],
+                       mode="maintain")  # no explicit key: use the pin
+    assert response.status_code == 202
+    run = _wait_terminal(run_client, response.json()["run_id"])
+    assert run["key"] == COPPER_KEY  # maintain targeted the pinned parser
 
 
 def test_run_cancel(tmp_path):
@@ -698,8 +710,8 @@ def test_launch_dialog_on_failed_statement(client):
     sid = upload(client, "blue-lantern-savings", BLUE).json()["id"]
     page = client.get(f"/accounts/blue-lantern-savings/statements/{sid}")
     assert "Register new bank" in page.text
-    assert "Launch draft run" in page.text
-    assert "Launch maintain run" in page.text  # account is pinned
+    assert "Launch run" in page.text
+    assert "maintain — evolve" in page.text  # account is pinned
     # a fresh failed upload carries the dialog in its outcome card too
     create(client, "Other Bank Account", key=COPPER_KEY)
     card = upload(client, "other-bank-account", BLUE,

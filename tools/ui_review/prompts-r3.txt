@@ -1,0 +1,43 @@
+You are re-reviewing screenshots of a web UI (round 3; round 1 verdict GA: NO with 41 findings, round 2 verdict ACCEPTABLE with 12). You are in headless mode — shell commands are denied. Use ONLY the read_file tool (no RunCommand, no shell) on each of these absolute paths before answering:
+
+/tmp/ui-shots-stmtledger/01-accounts-empty.png
+/tmp/ui-shots-stmtledger/02-accounts-list.png
+/tmp/ui-shots-stmtledger/03-account-parsed.png
+/tmp/ui-shots-stmtledger/04-account-pin-picker.png
+/tmp/ui-shots-stmtledger/05-statement-parsed.png
+/tmp/ui-shots-stmtledger/06-statement-failed.png
+/tmp/ui-shots-stmtledger/07-launch-dialog.png
+/tmp/ui-shots-stmtledger/09-upload-outcome-parsed.png
+/tmp/ui-shots-stmtledger/10-upload-duplicate.png
+/tmp/ui-shots-stmtledger/11-registry.png
+/tmp/ui-shots-stmtledger/12-runs-list.png
+/tmp/ui-shots-stmtledger/13-run-view-converged.png
+/tmp/ui-shots-stmtledger/14-run-view-failed-overlay.png
+/tmp/ui-shots-stmtledger/15-account-failed-statement.png
+
+CONTEXT (unchanged): "statementledger" is a local, single-user web tool for bank-statement PDFs: upload into accounts, parse with per-bank "registry parsers" verified by an arithmetic gate, launch supervised LLM "distill runs" for unknown banks (watched live with a PDF overlay). Server-rendered + htmx, one hand-written stylesheet, light theme, a utility where honest state signaling and density beat polish.
+
+WHAT CHANGED SINCE ROUND 2:
+- launch dialog is now an anchored popover (no longer pushes toolbar buttons around); pin popover narrowed and anchored under its trigger
+- the converged run view shows ONE banner, not two contradictory ones (the "saved to the registry / N statements parsed / Go to account" action banner replaces any earlier one)
+- the harness CLI command in failure banners wraps inside the banner instead of overflowing the page
+- overlay bands carry a visible label tag on the band itself (plus the "selection:" line under the PDF)
+- run-header status chips are semantically colored from first paint (green converged, red failed)
+- "1 needs attention" singular/plural fixed everywhere
+- statements-table numeric headers right-align with their data
+- run view subtitle shows the account display name and has a "← Distill runs" back link
+- global nav now reads: accounts · registry: N parsers · distill runs
+
+KEEP-LIST — do not re-flag, they are deliberate:
+1. No currency symbols on amounts: the parsed ledger carries no currency field; a guessed symbol would be wrong. Amounts are bare and locale-neutral.
+2. Registry rows are informational only (no click-through to parser source) — out of scope for now.
+3. No token/cost metrics on runs — the harness does not account tokens; duration is shown instead.
+4. The draft-code pane is plain text by design (no syntax highlighting/line numbers/copy button).
+5. The statement id (hex) is small metadata, not the heading.
+6. The pin-picker/launch popovers intentionally overlay content below them (they are popovers, not inline panels).
+
+YOUR TASK:
+1. NUMERED findings, each with severity (blocker / major / minor / nit), the screenshot filename, and a concrete description. New findings and unresolved round-2 issues both count.
+2. End with exactly one verdict: "GA: NO" / "ACCEPTABLE" / "GA: YES".
+
+Be specific and honest; do not invent problems, do not soften real ones.

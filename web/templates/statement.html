@@ -1,13 +1,14 @@
 {% extends "base.html" %}
-{% block title %}{{ meta.id }} · {{ account.display_name }} · statementledger{% endblock %}
+{% block title %}{{ meta.original_filename }} · {{ account.display_name }} · statementledger{% endblock %}
 {% block content %}
+<a class="back-link" href="/accounts/{{ account.slug }}">← {{ account.display_name }}</a>
 <div class="page-head">
   <div>
-    <h1 class="mono">{{ meta.id }}</h1>
+    <h1>{{ meta.original_filename }}</h1>
     <div class="page-sub">
-      <a href="/accounts/{{ account.slug }}">{{ account.display_name }}</a>
-      {% if meta.period %} · {{ meta.period|period }}{% endif %}
-      · uploaded {{ meta.uploaded_at|dt }} · {{ (meta.size_bytes / 1024)|round(0)|int }} KB
+      {% if meta.period %}{{ meta.period|period }} · {% endif %}
+      uploaded {{ meta.uploaded_at|dt }} · {{ (meta.size_bytes / 1024)|round(0)|int }} KB
+      · id <span class="mono">{{ meta.id }}</span>
     </div>
   </div>
 </div>
@@ -21,10 +22,15 @@
 {% elif ledger %}
 <div class="banner banner-fail"><strong>✗ Does not reconcile</strong> — the stored ledger fails the arithmetic gate (parser or statement changed since parsing). Re-parse.</div>
 {% elif meta.status == 'failed' %}
-<div class="banner banner-fail"><strong>✗ No parser verified this statement.</strong>
+<div class="banner banner-fail">
+  <strong>✗ No parser verified this statement.</strong>
   {% set last = meta.history[-1] if meta.history else None %}
   {% if last and last.note %}{{ last.note }}{% endif %}
-  See the account page for per-parser attempts and the harness command.</div>
+  Per-parser attempts are in <a href="#parse-history">Parse history</a> below —
+  register a parser for this bank with the distill harness:
+  <pre>$ uv run python tools/distill_harness.py {{ pdf_rel }} --max-probes 8</pre>
+  (needs STATEMENTLEDGER_LLM_* in .env — see .env.example)
+</div>
 {% else %}
 <div class="banner">◻ Unparsed.</div>
 {% endif %}
@@ -32,31 +38,26 @@
 <div class="toolbar">
   {% if ledger %}
   <span class="text-muted">parser <code>{{ ledger._key }}</code></span>
-  <a class="btn" href="/accounts/{{ account.slug }}/statements/{{ meta.id }}/ledger.json">ledger.json</a>
-  <a class="btn" href="/accounts/{{ account.slug }}/statements/{{ meta.id }}/ledger.csv">ledger.csv</a>
+  <a class="btn" href="/accounts/{{ account.slug }}/statements/{{ meta.id }}/ledger.json">export JSON</a>
+  <a class="btn" href="/accounts/{{ account.slug }}/statements/{{ meta.id }}/ledger.csv">export CSV</a>
   {% endif %}
-  <a class="btn" href="{{ pdf_rel }}">open original.pdf</a>
+  <a class="btn" href="{{ pdf_rel }}">open PDF</a>
   {% if meta.status == 'failed' %}
   <button class="btn" title="try every registered parser again — new registry modules are picked up live"
           hx-post="/accounts/{{ account.slug }}/probe"
           hx-vals='{"statement_id": "{{ meta.id }}"}'
-          hx-target="#probe-slot">Re-probe parsers</button>
+          hx-target="#probe-slot">re-probe parsers</button>
+  {% with sid = meta.id %}{% include "launch_dialog.html" %}{% endwith %}
   {% endif %}
   <form method="post" action="/accounts/{{ account.slug }}/statements/{{ meta.id }}/parse" class="inline-form">
     <input type="hidden" name="back_to" value="/accounts/{{ account.slug }}/statements/{{ meta.id }}">
-    <button class="btn" type="submit">re-parse</button>
+    <button class="btn" type="submit" title="parse again with the account's pinned parser">re-parse</button>
   </form>
   <button class="btn btn-danger" hx-delete="/accounts/{{ account.slug }}/statements/{{ meta.id }}"
           hx-confirm="Delete this statement?"
           hx-on::after-request="window.location='/accounts/{{ account.slug }}'">delete</button>
 </div>
 <div id="probe-slot"></div>
-
-{% if meta.status == 'failed' %}
-<div class="toolbar">
-  {% with sid = meta.id %}{% include "launch_dialog.html" %}{% endwith %}
-</div>
-{% endif %}
 
 {% if prov_bands %}
 {# §9.5 stretch: parsers MAY carry provenance (txn["line"], _anchors) —
@@ -117,7 +118,7 @@
 {% endif %}
 {% endif %}
 
-<h2>Parse history</h2>
+<h2 id="parse-history">Parse history</h2>
 <table class="table table-tight">
   <thead><tr><th>When</th><th>Outcome</th><th>Detail</th></tr></thead>
   <tbody>

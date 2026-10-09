@@ -4,9 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}statementledger{% endblock %}</title>
-  {# 4xx fragments must swap: a stored-but-unparseable upload is an outcome,
-     not a transport error (docs/web-ui-design.md §4). htmx default drops them. #}
-  <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"233","swap":false},{"code":"2xx","swap":true},{"code":"3xx","swap":false},{"code":"4xx","swap":true,"error":true},{"code":"5xx","swap":false,"error":true},{"code":"other","swap":false,"error":true}]}'>
+  {# htmx matches responseHandling codes as REGEXES against the status — the
+     "2xx" notation never matches, so fragments never swapped in-browser.
+     "[23].." swaps success outcomes; 4.. swaps outcome fragments (a stored
+     but unparseable upload is an outcome, not a transport error, §4); 204
+     is NOT special-cased so hx-swap="delete" rows still remove themselves. #}
+  <meta name="htmx-config" content='{"responseHandling":[{"code":"[23]..","swap":true},{"code":"3..","swap":false},{"code":"4..","swap":true,"error":true},{"code":"5..","swap":false,"error":true},{"code":".*","swap":false,"error":true}]}'>
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js" defer></script>
 </head>
@@ -14,7 +17,10 @@
   <header class="topbar">
     <a class="brand" href="/">statementledger</a>
     <nav>
-      <a href="/registry">registry: {{ registry_count() }} parsers</a>
+      {% set path = request.url.path %}
+      <a href="/" class="{{ 'active' if path == '/' else '' }}">accounts</a>
+      <a href="/registry" class="{{ 'active' if path.startswith('/registry') else '' }}">registry: {{ registry_count() }} parsers</a>
+      <a href="/runs" class="{{ 'active' if path.startswith('/runs') else '' }}">distill runs</a>
     </nav>
   </header>
   <main>

@@ -43,7 +43,23 @@
 
   function applyZoom() {
     stack.style.transform = "scale(" + zoom + ")";
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-zoom]"), function (button) {
+        button.classList.toggle(
+          "active", parseFloat(button.getAttribute("data-zoom")) === zoom);
+      });
   }
+
+  // fit the page to the pane on load — clipped amounts are unreadable, and
+  // the amounts are exactly what the gate verifies
+  function fitToPane() {
+    if (!pageImg.naturalWidth) { return; }
+    var viewport = document.querySelector(".pdf-viewport");
+    zoom = Math.min(1, (viewport.clientWidth - 24) / pageImg.naturalWidth);
+    applyZoom();
+  }
+  pageImg.addEventListener("load", fitToPane);
+  pageImg.complete && fitToPane();
 
   // -- overlay -----------------------------------------------------------
 
@@ -62,10 +78,18 @@
     var rect = selection.rect;
     var band = document.createElement("div");
     band.className = "overlay-band";
+    band.title = "what the probe looked at: " +
+      (selection.label || selection.line_ids.length + " lines");
     band.style.left = rect[0] * SCALE + "px";
     band.style.top = rect[1] * SCALE + "px";
     band.style.width = (rect[2] - rect[0]) * SCALE + "px";
     band.style.height = (rect[3] - rect[1]) * SCALE + "px";
+    var tag = document.createElement("span");
+    tag.className = "overlay-tag";
+    tag.style.fontSize = Math.round(11 / zoom) + "px"; // legible at any zoom
+    tag.textContent = selection.label
+      ? String(selection.label).slice(0, 44) : "selection";
+    band.appendChild(tag);
     overlay.appendChild(band);
     selectionLabel.textContent = "selection: r" + selection.round + " · " +
       (selection.label || (selection.line_ids.length + " lines"));
@@ -75,6 +99,10 @@
     scrubbedRound = round;
     follow = false;
     followDot.classList.remove("active");
+    document.querySelectorAll(".tl-round").forEach(function (row) {
+      row.classList.toggle(
+        "selected", Number(row.getAttribute("data-round")) === round);
+    });
     renderOverlay(lastSelection[round]);
     loadCode(round);
   }
@@ -169,12 +197,21 @@
         break;
       case "feedback_sent":
         roundRow(number);
+        var trace = document.createElement("button");
+        trace.className = "btn btn-small tl-trace";
+        trace.textContent = "trace ▸";
+        trace.title = "what the probe printed (round_" + number + ".out)";
+        trace.addEventListener("click", function () {
+          loadOutput(number);
+          scrub(number);
+        });
+        rounds[number].detail.appendChild(trace);
         addNote(number, String(event.summary || "").slice(0, 140));
         break;
       case "converged":
         setStatus("converged ✓ " + (event.key || ""), "chip-ok");
         finish("Converged — parser " + (event.key || "") +
-               (event.saved ? " saved to the registry" : " (not saved)"));
+               (event.saved ? " saved to the registry" : ""));
         break;
       case "failed":
         setStatus("failed ✗", "chip-fail");
@@ -185,7 +222,7 @@
         finish("Cancelled.");
         break;
       case "run_status": // server-side terminal (e.g. SIGKILL): stop here
-        setStatus(event.status, "chip-warn");
+        setStatus(event.status, statusClass(event.status));
         finish("Run " + event.status + ".");
         break;
     }
@@ -196,15 +233,52 @@
     statusChip.className = "chip " + (cls || "chip-key");
   }
 
+  function statusClass(status) {  // semantic color, same map as the server
+    return {converged: "chip-ok", failed: "chip-fail",
+            cancelled: "chip-muted", orphaned: "chip-warn",
+            cancelling: "chip-warn", running: "chip-key"}[status]
+           || "chip-key";
+  }
+
   function finish(message) {
     if (terminal) { return; }
     terminal = true;
     cancelButton.disabled = true;
+    cancelButton.style.display = "none";
     var banner = document.createElement("div");
     banner.className = "banner banner-warn";
     banner.textContent = message;
     timeline.appendChild(banner);
     timeline.scrollTop = timeline.scrollHeight;
+    // converged runs end in an action, not a shrug — and NEVER alongside a
+    // contradictory "(not saved)" banner: the fetch replaces it wholesale
+    fetch("/runs/" + config.id, {headers: {accept: "application/json"}})
+      .then(function (response) { return response.json(); })
+      .then(function (run) {
+        if (run.status !== "converged") { return; }
+        var detail = document.createElement("div");
+        detail.className = "banner banner-ok";
+        var saved = "Parser " + (run.converged_key || "?") +
+          (run.auto_parse === null
+            ? " verified but not registered (attach or canned run)."
+            : " saved to the registry.");
+        detail.textContent = saved + " ";
+        if (run.auto_parse && run.auto_parse.length) {
+          var parsed = run.auto_parse.filter(function (entry) {
+            return entry.status === "parsed"; }).length;
+          detail.textContent += parsed + " of " + run.auto_parse.length +
+            " pending statement(s) parsed. ";
+        }
+        var link = document.createElement("a");
+        link.className = "btn btn-small";
+        link.href = "/accounts/" + config.slug;
+        link.textContent = "Go to account";
+        detail.appendChild(link);
+        banner.remove();
+        timeline.appendChild(detail);
+        timeline.scrollTop = timeline.scrollHeight;
+      })
+      .catch(function () { /* the plain banner already says the essentials */ });
   }
 
   // -- code pane -----------------------------------------------------------
@@ -220,6 +294,16 @@
         }
         codeTitle.textContent = "round_" + round + ".py · " + detail.kind;
         codeEl.textContent = detail.code;
+      });
+  }
+
+  function loadOutput(round) {
+    fetch("/runs/" + config.id + "/rounds/" + round + "/output")
+      .then(function (response) { return response.ok ? response.json() : null; })
+      .then(function (detail) {
+        codeTitle.textContent = "round_" + round + ".out · probe output";
+        codeEl.textContent = detail
+          ? detail.output : "(no captured output for round " + round + ")";
       });
   }
 

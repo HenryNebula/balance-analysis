@@ -1,22 +1,14 @@
 {% extends "base.html" %}
 {% block title %}{{ account.display_name }} · statementledger{% endblock %}
 {% block content %}
+<a class="back-link" href="/">← Accounts</a>
 <div class="page-head">
   <div>
     <h1>{{ account.display_name }}</h1>
-    <div class="page-sub">
-      {% if ledger %}account {{ ledger.account_number|mask }} · {% endif %}
-      {{ metas|length }} statement{{ '' if metas|length == 1 else 's' }}
-      {% if chain.total %}
-        · {% if chain.breaks %}<span class="chip chip-fail">⚠ chain break: closing {{ chain.breaks[0].prev_closing|money }} ≠ next opening {{ chain.breaks[0].next_opening|money }}</span>
-           {% else %}<span class="chip chip-ok">chain ✓ ({{ chain.ok }}/{{ chain.total }} links)</span>{% endif %}
-      {% endif %}
-      {% if account.registry_key_source %} · pin source: {{ account.registry_key_source }}{% endif %}
-    </div>
   </div>
   <details class="pin-details">
-    <summary class="chip chip-key">{% if account.registry_key %}◇ pinned: {{ account.registry_key }}{% else %}◇ unpinned (detection mode){% endif %} — change</summary>
-    <form method="post" action="/accounts/{{ account.slug }}/key" class="form-column card card-form">
+    <summary class="chip chip-key" title="click to open or close">{% if account.registry_key %}◇ pinned: {{ account.registry_key }}{% else %}◇ unpinned (detection mode){% endif %} ▾</summary>
+    <form method="post" action="/accounts/{{ account.slug }}/key" class="form-column card card-form pin-form">
       <label>Parser
         <select name="registry_key">
           <option value="">unpinned — auto-detect on upload</option>
@@ -25,7 +17,10 @@
           {% endfor %}
         </select>
       </label>
-      <button type="submit" class="btn btn-primary">Save pin</button>
+      <div class="form-row">
+        <button type="submit" class="btn btn-primary">Save pin</button>
+        <button type="button" class="btn" onclick="this.closest('details').removeAttribute('open')">Close</button>
+      </div>
     </form>
   </details>
 </div>
@@ -35,7 +30,8 @@
 <form class="upload-zone"
       hx-post="/accounts/{{ account.slug }}/statements"
       hx-encoding="multipart/form-data"
-      hx-target="#statements-region" hx-swap="outerHTML">
+      hx-target="#statements-region" hx-swap="outerHTML"
+      hx-on::after-request="this.reset()">
   <input type="file" name="file" accept=".pdf,application/pdf" required>
   <button type="submit" class="btn btn-primary">Upload statement PDF</button>
   <span class="text-muted">PDF only · ≤ 25 MB · duplicates are detected by content</span>
@@ -46,7 +42,7 @@
 {% if runs %}
 <h2>Distill runs</h2>
 <table class="table table-tight">
-  <thead><tr><th>Run</th><th>Mode</th><th>Status</th><th>Started</th><th></th></tr></thead>
+  <thead><tr><th>Run</th><th>Mode</th><th>Status</th><th>Started</th><th class="th-actions">Actions</th></tr></thead>
   <tbody>
     {% for run in runs %}
     <tr>
@@ -62,9 +58,9 @@
       <td>{{ run.created_at|dt }}</td>
       <td class="td-actions">
         {% if run.status in ('running', 'cancelling') %}
-        <a class="btn btn-small" href="/runs/{{ run.id }}">Watch live</a>
+        <a class="btn btn-small" href="/runs/{{ run.id }}">watch live</a>
         {% else %}
-        <a class="btn btn-small" href="/runs/{{ run.id }}">View run</a>
+        <a class="btn btn-small" href="/runs/{{ run.id }}">view</a>
         {% endif %}
       </td>
     </tr>
@@ -73,12 +69,13 @@
 </table>
 {% endif %}
 
-<div class="row-end">
-  {% if account.registry_key %}
-  <button class="btn" title="sequential per-statement parse with the pinned key; reports old→new drift"
-          hx-post="/accounts/{{ account.slug }}/reparse"
-          hx-target="#statements-region" hx-swap="outerHTML">Re-parse all with ◇ {{ account.registry_key }}</button>
-  {% endif %}
-  <button class="btn btn-danger" hx-delete="/accounts/{{ account.slug }}" hx-confirm="Delete {{ account.display_name }} and every stored statement in it?">Delete account</button>
+<div class="toolbar row-end">
+  <details class="danger-zone">
+    <summary class="btn btn-danger">Danger zone</summary>
+    <div class="card card-form">
+      <div class="text-muted">Deletes the account and every stored statement in it. This cannot be undone.</div>
+      <button class="btn btn-danger" hx-delete="/accounts/{{ account.slug }}" hx-confirm="Delete {{ account.display_name }} and every stored statement in it?">Delete account</button>
+    </div>
+  </details>
 </div>
 {% endblock %}

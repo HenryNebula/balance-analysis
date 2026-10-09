@@ -1,12 +1,27 @@
-{# The statements table + the latest upload/parse outcome. Rendered inside
-   account.html, and swapped wholesale by upload/re-parse responses (hx-target
-   #statements-region). #}
+{# The live account region: counts + chain status, the latest upload/parse
+   outcome, and the statements table. Everything that changes on an
+   upload/re-parse swap lives INSIDE this div — the page header stays
+   static, so counts can never go stale above a fresh table. Rendered inside
+   account.html, and swapped wholesale by upload/re-parse responses. #}
 <div id="statements-region">
+  <div class="page-sub account-subhead">
+    {% if ledger %}account {{ ledger.account_number|mask }} · {% endif %}
+    {{ metas|length }} statement{{ '' if metas|length == 1 else 's' }} ·
+    {% set parsed = metas | selectattr('status', 'equalto', 'parsed') | list %}
+    {% set failed = metas | selectattr('status', 'equalto', 'failed') | list %}
+    {{ parsed|length }} parsed
+    {% if failed %} · <span class="text-warn">{{ failed|length }} need{{ 's' if failed|length == 1 else '' }} attention</span>{% endif %}
+    {% if chain.total > 0 %}
+      · {% if chain.breaks %}<span class="chip chip-fail">⚠ chain break: closing {{ chain.breaks[0].prev_closing|money }} ≠ next opening {{ chain.breaks[0].next_opening|money }}</span>
+         {% else %}<span class="chip chip-ok">chain ✓ ({{ chain.ok }}/{{ chain.total }} links)</span>{% endif %}
+    {% endif %}
+  </div>
+
   {% if outcome %}{% include "outcome.html" %}{% endif %}
 
   <table class="table">
     <thead>
-      <tr><th>Period</th><th>Txns</th><th>Opening → Closing</th><th>Status</th><th class="th-actions">Actions</th></tr>
+      <tr><th>Period</th><th class="num">Txns</th><th class="num">Opening → Closing</th><th>Status</th><th class="th-actions">Actions</th></tr>
     </thead>
     <tbody>
       {% for m in metas %}
@@ -28,11 +43,11 @@
           <a class="btn btn-small" href="/accounts/{{ account.slug }}/statements/{{ m.id }}">view</a>
           <button class="btn btn-small" title="re-parse with the account pin"
                   hx-post="/accounts/{{ account.slug }}/statements/{{ m.id }}/parse"
-                  hx-target="#statements-region" hx-swap="outerHTML">reparse</button>
-          <button class="btn btn-small btn-danger" title="delete statement"
+                  hx-target="#statements-region" hx-swap="outerHTML">re-parse</button>
+          <button class="btn btn-small btn-danger" title="delete this statement ({{ m.original_filename }})"
                   hx-delete="/accounts/{{ account.slug }}/statements/{{ m.id }}"
                   hx-confirm="Delete this statement ({{ m.original_filename }})?"
-                  hx-target="closest tr" hx-swap="delete">✕</button>
+                  hx-target="closest tr" hx-swap="delete">delete</button>
         </td>
       </tr>
       {% else %}
@@ -40,4 +55,12 @@
       {% endfor %}
     </tbody>
   </table>
+
+  {% if account.registry_key and metas %}
+  <div class="row-end statements-batch">
+    <button class="btn" title="sequential per-statement parse with the pinned key; reports old→new drift"
+            hx-post="/accounts/{{ account.slug }}/reparse"
+            hx-target="#statements-region" hx-swap="outerHTML">Re-parse all (pinned parser)</button>
+  </div>
+  {% endif %}
 </div>

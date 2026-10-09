@@ -46,12 +46,26 @@ from web.store import AccountExists, DuplicateStatement, Store
 MAX_MB_DEFAULT = 25
 
 
+def _duration(started: str | None, ended: str | None) -> str:
+    """Human elapsed between two ISO stamps ("2m 41s"); blank until ended."""
+    if not started or not ended:
+        return ""
+    from datetime import datetime
+
+    begin = datetime.fromisoformat(started)
+    finish = datetime.fromisoformat(ended)
+    seconds = int((finish - begin).total_seconds())
+    if seconds < 60:
+        return f"{seconds}s"
+    return f"{seconds // 60}m {seconds % 60:02d}s"
+
+
 def _description(key: str) -> str:
     """First docstring line of a registry module, for humans (distilled
     modules often carry no docstring — that is fine, not a load failure)."""
     try:
         lines = (sl.load_module(key).__doc__ or "").strip().splitlines()
-        return lines[0] if lines else ""
+        return (lines[0] if lines else "").rstrip(" —-")
     except Exception:  # noqa: BLE001 - a broken module still gets a row
         return "(module failed to load)"
 
@@ -338,6 +352,7 @@ def create_app(data_root: Path | None = None,
                       account=store.get_account(slug), metas=metas,
                       outcome=outcome, ledger=_latest_ledger(slug),
                       warnings=ledger.period_warnings(metas),
+                      chain=ledger.chain(metas, sl.TOL),
                       llm_model=os.environ.get(
                           "STATEMENTLEDGER_LLM_MODEL", ""))
 
@@ -354,7 +369,8 @@ def create_app(data_root: Path | None = None,
                           account=account, metas=metas,
                           outcome={"kind": "error", "message": message},
                           ledger=_latest_ledger(slug),
-                          warnings=ledger.period_warnings(metas))
+                          warnings=ledger.period_warnings(metas),
+                          chain=ledger.chain(metas, sl.TOL))
 
         if file is None or not file.filename:
             return error(400, "No file was uploaded.")
@@ -625,6 +641,8 @@ def create_app(data_root: Path | None = None,
             ids = [part.strip() for part in ids.split(",") if part.strip()]
         mode = str(payload.get("mode") or "draft")
         key = str(payload.get("key") or "").strip() or None
+        if mode == "maintain" and not key and account.get("registry_key"):
+            key = account["registry_key"]  # maintain = evolve the pin
         rounds = payload.get("rounds")
         max_probes = payload.get("max_probes")
         workdir = str(payload.get("workdir") or "").strip() or None
@@ -663,6 +681,12 @@ def create_app(data_root: Path | None = None,
     @app.get("/runs", response_class=HTMLResponse)
     def runs_list(request: Request):
         items = runs.list()
+        for run in items:  # human names + duration for the table
+            account = store.get_account(run["account_slug"])
+            run["display_name"] = (account or {}).get(
+                "display_name", run["account_slug"])
+            run["duration"] = _duration(run.get("created_at"),
+                                        run.get("ended_at"))
         if wants_json(request):
             return JSONResponse(items)
         return render("runs.html", request, runs=items)
@@ -691,8 +715,7 @@ def create_app(data_root: Path | None = None,
         config = {"id": run["id"], "slug": run["account_slug"],
                   "sid": first_sid, "pages": page_total}
         return render("run.html", request, run=run, account=account,
-                      model=model, pages=page_total,
-                      config=json.dumps(config))
+                      model=model, pages=page_total, config=config)
 
     @app.delete("/runs/{run_id}")
     def cancel_run(run_id: str, request: Request):
@@ -711,6 +734,21 @@ def create_app(data_root: Path | None = None,
         if detail is None:
             raise HTTPException(404, f"no round {number}")
         return JSONResponse(detail)
+
+    @app.get("/runs/{run_id}/rounds/{number}/output")
+    def run_round_output(run_id: str, number: int, request: Request):
+        """The round's captured stdout/stderr (round_N.out) — what the probe
+        or script actually printed, for the run view's trace pane."""
+        try:
+            run = runs.get(run_id)
+        except FileNotFoundError:
+            raise HTTPException(404, f"no run {run_id!r}")
+        workdir = run.get("workdir")
+        path = (Path(workdir) / f"round_{number}.out" if workdir else None)
+        if path is None or not path.exists():
+            raise HTTPException(404, f"no output for round {number}")
+        return JSONResponse({"round": number,
+                             "output": path.read_text(errors="replace")})
 
     @app.get("/runs/{run_id}/events")
     async def run_events(run_id: str, request: Request):

@@ -31,8 +31,8 @@ def chain(metas: list[dict], tol: float) -> dict:
             links.append({"from_id": prev["id"], "to_id": nxt["id"],
                           "prev_closing": prev_closing,
                           "next_opening": next_opening})
-    return {"total": len(parsed) - 1, "ok": len(parsed) - 1 - len(links),
-            "breaks": links}
+    total = max(len(parsed) - 1, 0)  # 0 parsed statements: 0 links, not -1
+    return {"total": total, "ok": total - len(links), "breaks": links}
 
 
 def period_warnings(metas: list[dict]) -> list[dict]:

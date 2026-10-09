@@ -33,17 +33,21 @@ main { max-width: 980px; margin: 0 auto; padding: 24px 20px 60px; }
 .brand { font-weight: 700; font-size: 17px; color: var(--ink); text-decoration: none; }
 .topbar nav a { color: var(--ink-soft); text-decoration: none; font-size: 14px; }
 .topbar nav a:hover { color: var(--ink); }
+.topbar nav a.active { color: var(--ink); font-weight: 600; }
 .foot {
-  max-width: 980px; margin: 0 auto; padding: 0 20px 30px;
+  max-width: 980px; margin: 0 auto; padding: 12px 20px 30px;
   color: var(--ink-soft); font-size: 12.5px;
+  border-top: 1px solid var(--line); margin-top: 30px;
 }
+.topbar nav { display: flex; gap: 16px; }
+.back-link { display: inline-block; margin-bottom: 6px; font-size: 13.5px; }
 
 h1 { font-size: 22px; margin: 8px 0 14px; }
 h2 { font-size: 16px; margin: 22px 0 10px; }
 a { color: var(--accent); }
 
 .page-head {
-  display: flex; justify-content: space-between; align-items: flex-start;
+  display: flex; justify-content: space-between; align-items: center;
   gap: 16px; flex-wrap: wrap; margin-bottom: 14px;
 }
 .page-sub { color: var(--ink-soft); font-size: 13.5px; }
@@ -60,9 +64,44 @@ a { color: var(--accent); }
 .card-title { font-weight: 600; font-size: 16px; color: var(--ink); text-decoration: none; }
 .card-title:hover { color: var(--accent); }
 .card-body { color: var(--ink-soft); font-size: 13.5px; margin-top: 4px; }
-.card-meta { margin-top: 2px; }
+.card-meta { margin-top: 2px; min-height: 1.4em; }
 .card-foot { margin-top: 10px; }
 .card-form h2 { margin: 0 0 10px; }
+/* the whole card is the click target (stretched-link pattern) */
+.card-clickable { position: relative; }
+.card-clickable:hover { border-color: #b9c2d0; }
+.card-clickable .card-title::after {
+  content: ""; position: absolute; inset: 0; border-radius: 10px;
+}
+.card-clickable .card-foot, .card-clickable .chip { position: relative; }
+
+/* collapsed new-account form */
+.new-account { margin-top: 4px; }
+.new-account summary { list-style: none; width: max-content; }
+.new-account[open] summary { margin-bottom: 10px; }
+.new-account .card { margin-top: 10px; }
+.hint { font-size: 11.5px; color: var(--ink-soft); margin-top: 2px; }
+
+/* danger zone */
+.danger-zone summary { list-style: none; width: max-content; }
+.danger-zone[open] .card {
+  margin-top: 10px; max-width: 420px; border-color: #f0c8c3;
+  display: flex; flex-direction: column; gap: 10px;
+}
+
+/* buttons */
+.btn { transition: border-color 120ms ease, background 120ms ease; }
+.btn[disabled], .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn[disabled]:hover, .btn:disabled:hover { background: var(--card); border-color: var(--line); }
+
+/* pin picker as a proper popover */
+.pin-details { position: relative; }
+.pin-details summary { list-style: none; cursor: pointer; }
+.pin-details summary::-webkit-details-marker { display: none; }
+.pin-details[open] .pin-form {
+  position: absolute; right: 0; top: calc(100% + 8px); width: 340px;
+  margin-top: 0; z-index: 20; box-shadow: 0 8px 24px rgba(20, 28, 45, 0.14);
+}
 
 /* chips */
 .chip {
@@ -88,10 +127,12 @@ a { color: var(--accent); }
 .banner-error { background: var(--fail-bg); border-color: #f0c8c3; color: var(--fail); }
 .banner-probe { background: #eef3fe; border-color: #c9d6f5; color: #2c3e66; }
 .banner-action { margin-top: 8px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.banner-row { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
 .banner .table { background: var(--card); }
-.banner .cli pre {
+.banner .cli pre, .banner pre {
   background: var(--card); border: 1px solid var(--line); border-radius: 6px;
   padding: 8px 10px; overflow-x: auto; font-size: 12.5px; margin: 6px 0 2px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
 
 /* tables */
@@ -110,11 +151,14 @@ a { color: var(--accent); }
 }
 .table tbody tr:last-child td { border-bottom: none; }
 .table tbody tr:hover { background: #fafbfc; }
-.num { text-align: right; font-variant-numeric: tabular-nums; }
+.num { font-variant-numeric: tabular-nums; }
+/* must out-specify the .table td default above (left) */
+.table th.num, .table td.num { text-align: right; }
 .mono, .table .mono { font-family: var(--mono); font-size: 13px; }
 .table-tight { font-size: 13px; }
 .table-tight th, .table-tight td { padding: 5px 10px; }
 .table-ledger td { padding: 5px 12px; }
+.table-ledger td.num { font-family: var(--mono); font-size: 12.5px; }
 .th-actions, .td-actions { text-align: right; white-space: nowrap; }
 .td-actions .btn { margin-left: 4px; }
 
@@ -148,23 +192,25 @@ input[type="text"], select {
 }
 
 /* pin changer */
-.pin-details summary { list-style: none; }
-.pin-details summary::-webkit-details-marker { display: none; }
-.pin-details[open] { width: 100%; max-width: 420px; }
-.pin-details[open] .card-form { margin-top: 10px; }
+.account-subhead { margin-bottom: 10px; }
 
 .text-muted { color: var(--ink-soft); }
 .text-warn { color: var(--warn); }
 .empty { color: var(--ink-soft); font-style: italic; padding: 10px 12px; }
 
-/* launch dialog (§6.2) */
-.launch-dialog { display: inline-block; }
-.launch-dialog summary { list-style: none; }
+/* launch dialog (§6.2) — an anchored popover, like the pin picker */
+.launch-dialog { position: relative; display: inline-block; }
+.launch-dialog summary { list-style: none; cursor: pointer; }
+.launch-dialog summary::-webkit-details-marker { display: none; }
 .launch-body {
-  margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line);
-  border-radius: 8px; background: var(--card); max-width: 560px;
+  position: absolute; left: 0; top: calc(100% + 8px); z-index: 30;
+  width: 480px; max-width: 90vw; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--card);
+  box-shadow: 0 8px 24px rgba(20, 28, 45, 0.14);
 }
-.launch-body .launch-form { margin-top: 8px; gap: 8px; }
+.launch-body .launch-form { margin-top: 8px; display: flex; flex-direction: column; gap: 10px; }
+.launch-body .launch-form .form-row { gap: 10px; align-items: flex-start; }
+.launch-body .launch-actions { margin-top: 2px; }
 .launch-body input[type="number"] { min-width: 70px; width: 80px; }
 .launch-body label { font-size: 12px; }
 
@@ -189,14 +235,27 @@ input[type="text"], select {
   position: absolute; background: rgba(43, 92, 255, 0.18);
   border: 1px solid rgba(43, 92, 255, 0.65); border-radius: 2px;
 }
+.overlay-tag {
+  position: absolute; top: -18px; left: 0; white-space: nowrap;
+  font-size: 10.5px; line-height: 1.5; padding: 0 6px; border-radius: 4px;
+  background: #2b5cff; color: #fff;
+}
 .overlay-band.anchor-band {
   background: rgba(196, 145, 16, 0.20); border-color: rgba(160, 116, 10, 0.7);
 }
 .overlay-band.lit { background: rgba(43, 92, 255, 0.45); }
-.pdf-selection { padding: 6px 10px; border-top: 1px solid var(--line); font-size: 12.5px; min-height: 30px; }
+.pdf-selection {
+  flex: 1; text-align: center; padding: 0 8px; border: none;
+  font-size: 12px; color: var(--ink); text-transform: none;
+  letter-spacing: normal; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .timeline { overflow-y: auto; max-height: 300px; padding: 8px 10px; flex: 0 1 auto; }
 .tl-round { border-left: 2px solid var(--line); margin-left: 6px; padding: 2px 0 2px 10px; }
+.tl-round.selected { border-left-color: var(--accent); background: #f2f5ff; border-radius: 0 6px 6px 0; }
+.zoom-controls .btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.statements-batch { margin: -6px 0 14px; }
 .tl-head {
   background: none; border: none; padding: 0; cursor: pointer;
   font-family: var(--mono); font-size: 12.5px; color: var(--ink);
@@ -214,7 +273,10 @@ input[type="text"], select {
   margin: 0; padding: 10px; overflow: auto; flex: 1; min-height: 160px;
   font-family: var(--mono); font-size: 12px; line-height: 1.5;
   background: #0f1420; color: #dce3f2; border-radius: 0 0 10px 10px;
+  scrollbar-width: thin; scrollbar-color: #3a4560 #0f1420;
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
+.timeline .tl-trace { margin-left: 4px; }
 .zoom-controls .btn-small { min-width: 44px; }
 
 /* provenance pages (§9.5) */
