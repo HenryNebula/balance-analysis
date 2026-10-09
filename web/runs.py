@@ -67,6 +67,7 @@ class RunManager:
         self._guard = threading.Lock()
         self._watchers: dict[str, threading.Thread] = {}
         self._processes: dict[str, subprocess.Popen] = {}
+        self._spawned_at: dict[str, float] = {}
 
     # -- run records -------------------------------------------------------
 
@@ -168,8 +169,13 @@ class RunManager:
         log = (self.runs_root / run["id"] / "harness.log").open("w")
         process = subprocess.Popen(  # noqa: S603 - fixed argv, our repo
             argv, cwd=self.repo_root, stdout=log, stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL, start_new_session=True)
+            stdin=subprocess.DEVNULL, start_new_session=True,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"})  # 'workdir:' must
+        # reach the log NOW, not when the block buffer fills — the manager
+        # resolves round artifacts from it while the run is live
         run["pid"] = process.pid
+        self._spawned_at[run["id"]] = time.time()  # WALL clock — compared
+        # against directory mtimes in the workdir fallback
         self._processes[run["id"]] = process  # poll() reaps; zombies don't
 
     # -- events -----------------------------------------------------------
@@ -321,20 +327,36 @@ class RunManager:
             if (terminal == "converged"
                     and run.get("converged_key") in sl.keys()):
                 self._auto_parse(run)
-        if not run.get("workdir") and run.get("pid"):
-            self._find_workdir(run)
+        if run.get("pid"):
+            self._find_workdir(run)  # cheap; the log line is authoritative
         return terminal if run.get("status") in TERMINAL_STATES else ""
 
     def _find_workdir(self, run: dict) -> None:
-        """The harness prints 'workdir: logs/distill_...' as its second
-        line; round artifacts live there."""
+        """The harness prints 'workdir: logs/distill_...' early (its stdout
+        is unbuffered); round artifacts live there. That line is the only
+        authority — it OVERWRITES any provisional fallback value, so a
+        mis-guess can never stick."""
         log = self._run_dir(run["id"]) / "harness.log"
-        if not log.exists():
+        if log.exists():
+            match = re.search(r"^workdir: (.+)$",
+                              log.read_text(errors="replace"), re.M)
+            if match:
+                truth = match.group(1).strip()
+                if run.get("workdir") != truth:
+                    run["workdir"] = truth
+                    self._write(run)
+                return
+        if run.get("workdir"):
+            return  # provisional value stands until the log speaks
+        since = self._spawned_at.get(run["id"])
+        if since is None:
             return
-        match = re.search(r"^workdir: (.+)$", log.read_text(errors="replace"),
-                          re.M)
-        if match:
-            run["workdir"] = match.group(1).strip()
+        candidates = [path for path in (self.repo_root / "logs").glob(
+            "distill_*") if path.is_dir()
+            and path.stat().st_mtime >= since - 1]
+        if candidates:
+            run["workdir"] = str(max(candidates,
+                                     key=lambda p: p.stat().st_mtime))
             self._write(run)
 
     def _derive_attach(self, run: dict, state: dict) -> str:

@@ -26,6 +26,8 @@
 
   var rounds = {};        // round -> {el, selections: [], kind}
   var lastSelection = {}; // round -> last probe selection
+  var roundOutput = {};   // round -> live stdout tail from the round_ran event
+  var viewingOutput = false; // code pane currently shows a trace, not code
   var follow = true;
   var currentPage = 0;
   var terminal = false;
@@ -152,6 +154,22 @@
      .forEach(function (badge) { badge.remove(); });
   }
 
+  function addTraceButton(number) {
+    var entry = rounds[number];
+    if (!entry || entry.traceButton) { return; }
+    var trace = document.createElement("button");
+    trace.className = "btn btn-small tl-trace";
+    trace.textContent = "trace ▸";
+    trace.title = "what this round printed";
+    trace.addEventListener("click", function () {
+      scrub(number);      // moves selection + overlay (starts a code fetch)
+      loadOutput(number); // then takes the pane; the code fetch checks the
+                          // flag and won't clobber a trace being viewed
+    });
+    entry.detail.appendChild(trace);
+    entry.traceButton = trace;
+  }
+
   function addNote(number, text) {
     var entry = rounds[number];
     if (!entry) { return; }
@@ -191,6 +209,11 @@
         clearRunning(number);
         addBadge(number, event.returncode === 0 ? "ran ✓" : "ran ✗",
                  event.returncode === 0 ? "chip-ok" : "chip-fail");
+        if (event.stdout_tail) {
+          roundOutput[number] = event.stdout_tail;
+          addTraceButton(number);
+          if (scrubbedRound === number && viewingOutput) { loadOutput(number); }
+        }
         if (follow || scrubbedRound === number) { loadCode(number); }
         break;
       case "gate":
@@ -222,15 +245,7 @@
         break;
       case "feedback_sent":
         roundRow(number);
-        var trace = document.createElement("button");
-        trace.className = "btn btn-small tl-trace";
-        trace.textContent = "trace ▸";
-        trace.title = "what the probe printed (round_" + number + ".out)";
-        trace.addEventListener("click", function () {
-          loadOutput(number);
-          scrub(number);
-        });
-        rounds[number].detail.appendChild(trace);
+        addTraceButton(number);
         addNote(number, String(event.summary || "").slice(0, 140));
         break;
       case "converged":
@@ -309,9 +324,11 @@
   // -- code pane -----------------------------------------------------------
 
   function loadCode(round, retry) {
+    viewingOutput = false;
     fetch("/runs/" + config.id + "/rounds/" + round)
       .then(function (response) { return response.ok ? response.json() : null; })
       .then(function (detail) {
+        if (viewingOutput) { return; } // a trace took the pane meanwhile
         if (!detail) {
           // the round_saved event can beat the manager's workdir resolution —
           // the file exists but the run record doesn't know where yet
@@ -327,10 +344,18 @@
   }
 
   function loadOutput(round) {
+    viewingOutput = true;
+    // the live event tail needs no workdir round-trip — it arrives with the
+    // round, exactly when the overlay does; the file is the fuller version
+    if (roundOutput[round] !== undefined) {
+      codeTitle.textContent = "round_" + round + ".out · live tail";
+      codeEl.textContent = roundOutput[round];
+      return;
+    }
     fetch("/runs/" + config.id + "/rounds/" + round + "/output")
       .then(function (response) { return response.ok ? response.json() : null; })
       .then(function (detail) {
-        codeTitle.textContent = "round_" + round + ".out · probe output";
+        codeTitle.textContent = "round_" + round + ".out";
         codeEl.textContent = detail
           ? detail.output : "(no captured output for round " + round + ")";
       });
