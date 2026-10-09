@@ -23,7 +23,7 @@
       <a href="/runs" class="{{ 'active' if path.startswith('/runs') else '' }}">distill runs</a>
     </nav>
   </header>
-  <main>
+  <main class="{% block main_class %}{% endblock %}">
     {% block content %}{% endblock %}
   </main>
   <footer class="foot">local · no auth · do not port-forward — statements are sensitive financial data</footer>

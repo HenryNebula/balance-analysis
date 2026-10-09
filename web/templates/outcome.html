@@ -11,8 +11,7 @@
   </div>
   {% if outcome.suggest_pin %}
   <div class="banner-action">
-    Exactly one parser verified this statement. Pin the account to it so future
-    uploads skip detection?
+    Found this bank's parser. Pin it for future uploads?
     <form method="post" action="/accounts/{{ account.slug }}/key" class="inline-form">
       <input type="hidden" name="registry_key" value="{{ outcome.suggest_pin }}">
       <button type="submit" class="btn btn-small btn-primary">Pin to {{ outcome.suggest_pin }}</button>
@@ -20,8 +19,7 @@
   </div>
   {% elif outcome.ambiguous %}
   <div class="banner-action text-warn">
-    {{ outcome.ambiguous|length }} parsers verified this statement. Parsed with
-    the first; the account stays unpinned — pin the one this bank is:
+    {{ outcome.ambiguous|length }} parsers match — pick this bank's:
     {% for key in outcome.ambiguous %}
     <form method="post" action="/accounts/{{ account.slug }}/key" class="inline-form">
       <input type="hidden" name="registry_key" value="{{ key }}">
@@ -52,10 +50,10 @@
     <pre>$ uv run python tools/distill_harness.py {{ outcome.pdf_rel }} --max-probes 8</pre>
   </div>
   <div class="banner-action">
-    <button class="btn btn-small" title="try every registered parser again — new registry modules are picked up live"
+    <button class="btn btn-small" title="try every parser again — new ones are picked up live"
             hx-post="/accounts/{{ account.slug }}/probe"
             hx-vals='{"statement_id": "{{ outcome.statement.id }}"}'
-            hx-target="next .probe-slot">Re-probe parsers</button>
+            hx-target="next .probe-slot">try all parsers</button>
     {% with sid = outcome.statement.id %}{% include "launch_dialog.html" %}{% endwith %}
     <a class="btn btn-small" href="/accounts/{{ account.slug }}/statements/{{ outcome.statement.id }}">view</a>
   </div>

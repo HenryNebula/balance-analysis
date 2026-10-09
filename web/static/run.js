@@ -124,6 +124,7 @@
     row.appendChild(detail);
     timeline.appendChild(row);
     rounds[number] = {el: row, detail: detail};
+    if (follow) { timeline.scrollTop = timeline.scrollHeight; } // keep pace
     return row;
   }
 
@@ -134,6 +135,14 @@
     badge.className = "chip " + (cls || "chip-muted");
     badge.innerHTML = html;
     entry.detail.appendChild(badge);
+    if (follow) { timeline.scrollTop = timeline.scrollHeight; }
+  }
+
+  function clearRunning(number) {
+    var entry = rounds[number];
+    if (!entry) { return; }
+    entry.detail.querySelectorAll(".tl-running")
+     .forEach(function (badge) { badge.remove(); });
   }
 
   function addNote(number, text) {
@@ -164,15 +173,19 @@
         roundRow(number);
         addBadge(number, event.kind === "probe" ? "probe" : "script",
                  event.kind === "probe" ? "chip-key" : "chip-muted");
+        addBadge(number, "running…", "chip-muted tl-running");
         if (follow) { scrub(number); }
         break;
       case "round_ran":
         roundRow(number);
+        clearRunning(number);
         addBadge(number, event.returncode === 0 ? "ran ✓" : "ran ✗",
                  event.returncode === 0 ? "chip-ok" : "chip-fail");
+        if (follow || scrubbedRound === number) { loadCode(number); }
         break;
       case "gate":
         roundRow(number);
+        clearRunning(number);
         var verdict = event.verdict || {};
         addBadge(number, gateSummary(verdict),
                  verdict.verified ? "chip-ok" : "chip-fail");
@@ -187,11 +200,13 @@
         break;
       case "lint_rejected":
         roundRow(number);
+        clearRunning(number);
         addBadge(number, "lint ✗", "chip-fail");
         addNote(number, String(event.violation || "").slice(0, 120));
         break;
       case "chat_failed":
         roundRow(number);
+        clearRunning(number);
         addBadge(number, "chat ✗", "chip-fail");
         addNote(number, String(event.error || "").slice(0, 120));
         break;
@@ -283,17 +298,21 @@
 
   // -- code pane -----------------------------------------------------------
 
-  function loadCode(round) {
+  function loadCode(round, retry) {
     fetch("/runs/" + config.id + "/rounds/" + round)
       .then(function (response) { return response.ok ? response.json() : null; })
       .then(function (detail) {
         if (!detail) {
-          codeTitle.textContent = "";
-          codeEl.textContent = "(no round_" + round + ".py yet)";
+          // the round_saved event can beat the manager's workdir resolution —
+          // the file exists but the run record doesn't know where yet
+          if (!retry) { setTimeout(function () { loadCode(round, true); }, 900); }
           return;
         }
         codeTitle.textContent = "round_" + round + ".py · " + detail.kind;
         codeEl.textContent = detail.code;
+        codeEl.classList.remove("code-fresh");
+        void codeEl.offsetWidth; // restart the animation
+        codeEl.classList.add("code-fresh");
       });
   }
 

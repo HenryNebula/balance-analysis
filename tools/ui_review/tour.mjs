@@ -79,17 +79,16 @@ if (phase === "main") {
   await shot(f, "07-launch-dialog", { fullPage: false });
 
   // reset the sacrificial account, then drive real upload outcomes
+  // (selecting a file auto-submits the dropzone form via its change handler)
   await api.delete(`${BASE}/accounts/${A.sacrificial}`).catch(() => {});
   await api.post(`${BASE}/accounts`, { form: { display_name: "Probe Playground", registry_key: "" } });
   const s = await fresh();
   await s.goto(`${BASE}/accounts/${A.sacrificial}`);
   await s.locator('input[type="file"]').setInputFiles("tests/fixtures/copperkettle_checking.pdf");
-  await s.locator("form.upload-zone button").click();
   await s.waitForSelector(".banner-ok", { timeout: 30000 });
   await shot(s, "09-upload-outcome-parsed");
 
   await s.locator('input[type="file"]').setInputFiles("tests/fixtures/copperkettle_checking.pdf");
-  await s.locator("form.upload-zone button").click();
   await s.waitForSelector(".banner-warn", { timeout: 30000 });
   await shot(s, "10-upload-duplicate");
 

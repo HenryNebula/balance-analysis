@@ -12,9 +12,9 @@
     <div class="card-head">
       <a class="card-title" href="/accounts/{{ row.account.slug }}">{{ row.account.display_name }}</a>
       {% if row.account.registry_key %}
-        <span class="chip chip-key" title="pinned parser">◇ {{ row.account.registry_key }}</span>
+        <span class="chip chip-key" title="{{ row.account.registry_key }}">◇ {{ row.account.registry_key }}</span>
       {% else %}
-        <span class="chip chip-muted" title="try every registered parser on upload">◇ detection</span>
+        <span class="chip chip-muted" title="the bank's parser is picked automatically on the first upload">◇ auto-detect</span>
       {% endif %}
     </div>
     <div class="card-body">
@@ -47,7 +47,7 @@
           <option value="">auto-detect</option>
           {% for key in keys %}<option value="{{ key }}">{{ key }}</option>{% endfor %}
         </select>
-        <span class="hint">optional — leave unset to try every parser</span>
+        <span class="hint">optional</span>
       </label>
       <button type="submit" class="btn btn-primary">Create account</button>
     </form>

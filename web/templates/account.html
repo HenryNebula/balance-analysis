@@ -7,15 +7,16 @@
     <h1>{{ account.display_name }}</h1>
   </div>
   <details class="pin-details">
-    <summary class="chip chip-key" title="click to open or close">{% if account.registry_key %}◇ pinned: {{ account.registry_key }}{% else %}◇ unpinned (detection mode){% endif %} ▾</summary>
+    <summary class="chip chip-key" title="click to open or close">{% if account.registry_key %}◇ pinned: {{ account.registry_key }}{% else %}◇ auto-detect{% endif %} ▾</summary>
     <form method="post" action="/accounts/{{ account.slug }}/key" class="form-column card card-form pin-form">
       <label>Parser
         <select name="registry_key">
-          <option value="">unpinned — auto-detect on upload</option>
+          <option value="">auto-detect</option>
           {% for key in keys %}
           <option value="{{ key }}" {% if key == account.registry_key %}selected{% endif %}>{{ key }}</option>
           {% endfor %}
         </select>
+        <span class="hint">Parsers are shared registry code — one per bank, reused by every account. If statements drift: unpin to re-detect, or evolve the parser with a maintain run.</span>
       </label>
       <div class="form-row">
         <button type="submit" class="btn btn-primary">Save pin</button>
@@ -30,12 +31,41 @@
 <form class="upload-zone"
       hx-post="/accounts/{{ account.slug }}/statements"
       hx-encoding="multipart/form-data"
-      hx-target="#statements-region" hx-swap="outerHTML"
-      hx-on::after-request="this.reset()">
-  <input type="file" name="file" accept=".pdf,application/pdf" required>
-  <button type="submit" class="btn btn-primary">Upload statement PDF</button>
-  <span class="text-muted">PDF only · ≤ 25 MB · duplicates are detected by content</span>
+      hx-target="#statements-region" hx-swap="outerHTML">
+  <input type="file" name="file" accept=".pdf,application/pdf" required hidden
+         id="pdf-input" hx-on:change="htmx.trigger(this.closest('form'), 'submit')">
+  <label class="dropzone" for="pdf-input">
+    <span class="dropzone-title">Drop a statement PDF here — or click to choose</span>
+    <span class="dropzone-sub">it is parsed and verified as part of the upload · PDF · ≤ 25 MB</span>
+  </label>
+  <span class="dropzone-busy">parsing<span class="spinner"></span></span>
 </form>
+<script>
+  // drag & drop for the upload zone (progressive enhancement, ~10 lines)
+  (function () {
+    var input = document.getElementById("pdf-input");
+    var zone = document.querySelector(".dropzone");
+    if (!input || !zone) { return; }
+    ["dragenter", "dragover"].forEach(function (name) {
+      zone.addEventListener(name, function (event) {
+        event.preventDefault();
+        zone.classList.add("drag");
+      });
+    });
+    ["dragleave", "drop"].forEach(function (name) {
+      zone.addEventListener(name, function (event) {
+        event.preventDefault();
+        zone.classList.remove("drag");
+      });
+    });
+    zone.addEventListener("drop", function (event) {
+      if (event.dataTransfer.files.length) {
+        input.files = event.dataTransfer.files;
+        htmx.trigger(input.closest("form"), "submit");
+      }
+    });
+  })();
+</script>
 
 {% include "statements_region.html" %}
 

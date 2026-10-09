@@ -222,7 +222,7 @@ def test_unpin(client):
                            follow_redirects=False)
     assert response.status_code in (200, 303)
     page = client.get("/accounts/blue-lantern-savings")
-    assert "detection mode" in page.text
+    assert "auto-detect" in page.text
 
 
 def test_delete_statement(client):

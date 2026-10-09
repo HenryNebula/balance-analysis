@@ -43,10 +43,10 @@
   {% endif %}
   <a class="btn" href="{{ pdf_rel }}">open PDF</a>
   {% if meta.status == 'failed' %}
-  <button class="btn" title="try every registered parser again — new registry modules are picked up live"
+  <button class="btn" title="try every parser again — new ones are picked up live"
           hx-post="/accounts/{{ account.slug }}/probe"
           hx-vals='{"statement_id": "{{ meta.id }}"}'
-          hx-target="#probe-slot">re-probe parsers</button>
+          hx-target="#probe-slot">try all parsers</button>
   {% with sid = meta.id %}{% include "launch_dialog.html" %}{% endwith %}
   {% endif %}
   <form method="post" action="/accounts/{{ account.slug }}/statements/{{ meta.id }}/parse" class="inline-form">

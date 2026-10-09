@@ -1,7 +1,7 @@
 {# Probe results fragment (POST /accounts/{slug}/probe, §7.3) — swapped into
    the .probe-slot the invoking button sits above. #}
 <div class="banner banner-probe">
-  <strong>Probe — every registered parser, nothing persisted</strong>
+  <strong>Probe — every parser, nothing saved</strong>
   {% if note %}<div>{{ note }}</div>{% endif %}
   <table class="table table-tight">
     <thead><tr><th>Parser</th><th>Verdict</th><th class="num">Rows</th><th>Detail</th></tr></thead>
@@ -18,7 +18,7 @@
   </table>
   {% if suggested %}
   <div class="banner-action">
-    Exactly one parser verifies. Pin the account to it?
+    Found this bank's parser. Pin it?
     <form method="post" action="/accounts/{{ account.slug }}/key" class="inline-form">
       <input type="hidden" name="registry_key" value="{{ suggested }}">
       <button type="submit" class="btn btn-small btn-primary">Pin to {{ suggested }}</button>
@@ -26,7 +26,7 @@
   </div>
   {% elif verified|length > 1 %}
   <div class="banner-action text-warn">
-    {{ verified|length }} parsers verify this statement — pick one to pin:
+    {{ verified|length }} parsers match — pick this bank's:
     {% for key in verified %}
     <form method="post" action="/accounts/{{ account.slug }}/key" class="inline-form">
       <input type="hidden" name="registry_key" value="{{ key }}">
@@ -35,6 +35,6 @@
     {% endfor %}
   </div>
   {% else %}
-  <div class="text-muted">No registered parser verifies this statement — it needs a new one (distill harness).</div>
+  <div class="text-muted">No parser verifies — this bank needs a new one (distill run).</div>
   {% endif %}
 </div>
