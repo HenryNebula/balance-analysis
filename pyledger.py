@@ -396,12 +396,13 @@ def validate(stmt) -> list[str]:
     return errors
 
 
-def _crash_hint(error: BaseException) -> str:
+def hint_for(message: str) -> str:
     """A remedial hint for crash shapes drafters hit repeatedly, keyed off
-    the exception itself. Empty string when the shape is unknown."""
-    message = str(error)
-    if isinstance(error, KeyError) and message.strip("'\"") in (
-            "lines", "items", "name", "page", "y"):
+    the error text (works on tracebacks as well as live exceptions). Empty
+    string when the shape is unknown."""
+    if "KeyError" in message and any(
+            f"'{key}'" in message or f'"{key}"' in message
+            for key in ("lines", "items", "name", "page", "y")):
         return ("frames is ONE statement dict: {'name':…, 'lines': [{'page':"
                 "…, 'y':…, 'items': [[text,x1,x2],…]},…]} — the keys live on "
                 "the statement and its lines, and items are LISTS")
@@ -415,15 +416,18 @@ def _crash_hint(error: BaseException) -> str:
                 "are LISTS [text, x1, x2]: item[0] text, item[1] x1, "
                 "item[2] x2. Dict keys ('lines', 'items') live on the "
                 "statement/line dicts")
-    if "NoneType" in type(error).__name__ or "NoneType" in message:
+    if "NoneType" in message:
         return ("a None leaked into your logic — pl.parse_amount()/"
                 "pl.parse_date() return None for unreadable tokens (blank, "
                 "'—', non-money text). Check for None before arithmetic; a "
                 "row whose money cells are all None is a description-wrap "
                 "line, not a transaction")
-    if isinstance(error, ValueError) and "embedded null" in message:
-        return ""
     return ""
+
+
+def _crash_hint(error: BaseException) -> str:
+    """hint_for() over a live exception."""
+    return hint_for(f"{type(error).__name__}: {error}")
 
 
 TOTAL_KINDS = ("positive", "negative", "all")

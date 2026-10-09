@@ -471,6 +471,85 @@ PY_CONTRACT = """Contract for every response:
   what is wrong (a stop term cutting the table early, a dropped row, a
   wrong sign)."""
 
+PY_EXAMPLE = '''import re
+
+import pyledger as pl
+
+KEY = "us__demo__checking__1"
+
+
+def parse(frames):
+    lines = frames["lines"]
+
+    def beside(label):                      # value printed right of a label
+        for line in lines:
+            for text, x1, _x2 in line["items"]:
+                if label in text:
+                    right = [t for t, a, _b in line["items"] if a > x1]
+                    if right:
+                        return " ".join(right)
+        raise ValueError(f"label not printed: {label}")
+
+    account = beside("Account No:")
+    opening = pl.parse_amount(beside("Beginning Balance"))
+    closing = pl.parse_amount(beside("Ending Balance"))
+    year = int(re.search(r"\\b(19|20)\\d{2}\\b", beside("Statement Period")).group())
+
+    header = next(line for line in lines                 # the column header row
+                  if {"Date", "Amount"} <= {i[0] for i in line["items"]})
+    cols = sorted(((t, (x1 + x2) / 2) for t, x1, x2 in header["items"]),
+                  key=lambda c: c[1])
+    names = [n for n, _ in cols]
+    centers = [c for _, c in cols]
+    edges = ([float("-inf")] + [(a + b) / 2 for a, b in zip(centers, centers[1:])]
+             + [float("inf")])
+
+    def column(cx):                        # which header an item sits under
+        for name, low, high in zip(names, edges, edges[1:]):
+            if low <= cx < high:
+                return name
+        return names[-1]
+
+    transactions, pending_desc, pending_date = [], "", None
+    for line in lines[lines.index(header) + 1:]:
+        if "End of activity" in pl.line_text(line):      # stop term, READ it
+            break
+        row = {}
+        for text, x1, x2 in line["items"]:
+            name = column((x1 + x2) / 2)
+            row[name] = (row.get(name, "") + " " + text).strip()
+        if not any(row.values()):
+            continue
+        date = pl.parse_date(row.get("Date", ""), default_year=year)
+        amount = pl.parse_amount(row.get("Amount", ""), strict_grouping=True)
+        if amount is None:                  # no money: description wrap line
+            pending_date = date or pending_date
+            pending_desc = (pending_desc + " " + row.get("Description", "")).strip()
+            continue
+        transactions.append({
+            "date": date or pending_date,
+            "description": (pending_desc + " " + row.get("Description", "")).strip(),
+            "amount": amount,
+            "balance": pl.parse_amount(row.get("Balance", "")),
+        })
+        pending_desc, pending_date = "", None
+
+    return {"bank_name": beside("Bank"), "account_number": account,
+            "opening_balance": opening, "closing_balance": closing,
+            "transactions": transactions}
+
+
+if __name__ == "__main__":
+    statement = parse(pl.load_frames()[0])
+    print(statement["account_number"], statement["opening_balance"],
+          "->", statement["closing_balance"])
+    for txn in statement["transactions"][:5]:
+        print(txn)
+    pl.reconcile([t["amount"] for t in statement["transactions"]],
+                 statement["opening_balance"], statement["closing_balance"],
+                 [t["balance"] for t in statement["transactions"]])
+'''
+
 PY_TASK_TEMPLATE = """Statement to parse: {name} ({pages} pages, {lines} layout
 lines). frames.json in the working directory holds it; pl.load_frames() reads
 it.
@@ -959,6 +1038,7 @@ def draft_by_repl(
     task_message: str | None = None,
     require_key: str | None = None,
     enforce_look_gate: bool = True,
+    max_probes: int | None = None,
 ) -> tuple[dict | None, bool, list[dict]]:
     """Returns (best artifact or None, verified?, round history). The artifact
     is a config dict (engine='config') or {'key', 'code'} for a pyledger
@@ -1064,10 +1144,14 @@ def draft_by_repl(
         # probe that showed the END of the statement (detectable: show()
         # prints line indices, so a high index in probe stdout means the tail
         # was on screen). Small models guess stop words unless forced to read
-        # them; this is the forcing.
+        # them; this is the forcing. Waived once the probe budget is spent —
+        # otherwise bounces and the gate deadlock (the model can neither
+        # probe again nor commit).
+        budget_spent = (max_probes is not None and probes_done >= max_probes)
         if (
             not is_probe
             and not commit_mode
+            and not budget_spent
             and canned_script is None
             and enforce_look_gate
             and (probes_done < 1 or not tail_seen)
@@ -1114,6 +1198,25 @@ def draft_by_repl(
             messages.append({"role": "user", "content": feedback})
             history.append({"round": round_number, "outcome": "probe+config rejected"})
             continue
+        # Probe budget: small models ignore the 90% warning and probe forever
+        # (the local 4B spent 29 of 30 turns probing, one full script, zero
+        # gate feedback). With a budget set, probes beyond it are BOUNCED —
+        # not executed — with commit-now feedback.
+        if (is_probe and max_probes is not None and probes_done >= max_probes
+                and canned_script is None):
+            feedback = (
+                f"PROBE BUDGET ({max_probes}) EXHAUSTED — you have seen "
+                "enough. Return the COMPLETE full script now: KEY + def "
+                "parse(frames) + the demo guarded by if __name__ == "
+                "'__main__'. It does not need to be perfect; the gate runs "
+                "it, and the error names exactly what to fix next round."
+            )
+            messages.append({"role": "user", "content": feedback})
+            history.append(
+                {"round": round_number, "outcome": f"probe bounced (budget {max_probes})"}
+            )
+            trace.log(f"round {round_number} probe bounced", "budget exhausted")
+            continue
         if is_probe:
             consecutive_probes += 1
             probes_done += 1
@@ -1123,7 +1226,8 @@ def draft_by_repl(
             # stop-word region was actually displayed.
             shown = [
                 int(index)
-                for index in re.findall(r"^(\d{1,4}) \[", outcome["stdout"], re.M)
+                for index in re.findall(
+                    r"^(\d{1,4}) [\[{]", outcome["stdout"], re.M)
             ]
             if shown and max(shown) >= total_lines - 8:
                 tail_seen = True
@@ -1237,7 +1341,11 @@ def draft_by_repl(
                 else f"rejected at validation: {evaluation['error'][:90]}"
             )
         else:
-            summary = "no parse() exercised" if engine == "py" else "no config distilled"
+            if engine == "py":
+                summary = ("script crashed" if outcome["returncode"] != 0
+                           else "no parse() exercised")
+            else:
+                summary = "no config distilled"
 
         print(f"round {round_number}: {summary} ({elapsed:.1f}s)")
         history.append({"round": round_number, "outcome": summary})
@@ -1273,6 +1381,13 @@ def draft_by_repl(
         if engine == "py":
             if evaluation is not None:
                 parts.append(py_feedback(evaluation))
+            elif outcome["returncode"] != 0:
+                import pyledger
+
+                last = (outcome["stderr"].strip().splitlines() or [""])[-1]
+                hint = pyledger.hint_for(last)
+                if hint:
+                    parts.append(f"HINT: {hint}")
             elif "def parse(" not in code:
                 parts.append(
                     "The script never defines def parse(frames) — the "
@@ -1366,6 +1481,14 @@ def main() -> int:
         "ALL given statements to verify (pass old AND new ones: the old are "
         "the regression set)",
     )
+    cli.add_argument(
+        "--max-probes",
+        type=int,
+        default=None,
+        help="burner-probe budget; probes beyond it are bounced with "
+        "commit-now feedback (small models ignore the 90%% warning and "
+        "probe forever; default: unlimited)",
+    )
     args = cli.parse_args()
     if args.key and not args.py:
         cli.error("--key (maintain mode) requires --py")
@@ -1386,7 +1509,11 @@ def main() -> int:
     trace.log("run start", f"mode={mode}\npdfs={[str(p) for p in args.pdfs]}")
 
     if args.py:
-        system, template = PY_SYSTEM_PROMPT + "\n\n" + PY_CONTRACT, PY_TASK_TEMPLATE
+        system = (PY_SYSTEM_PROMPT + "\n\n" + PY_CONTRACT
+                  + "\n\nA complete parser for a different (demo) bank — "
+                    "imitate its shape and length, not its labels:\n\n"
+                    "```python\n" + PY_EXAMPLE + "\n```")
+        template = PY_TASK_TEMPLATE
     elif args.lean:
         system, template = LEAN_SYSTEM_PROMPT, LEAN_TASK_TEMPLATE
     else:
@@ -1439,7 +1566,7 @@ def main() -> int:
         system_prompt=system, task_template=template,
         engine="py" if args.py else "config",
         task_message=task_message, require_key=require_key,
-        enforce_look_gate=look_gate,
+        enforce_look_gate=look_gate, max_probes=args.max_probes,
     )
     if config is None or not verified:
         trace.log("result", f"FAILED ({'no artifact' if config is None else 'not verified'})")
