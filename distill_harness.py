@@ -62,7 +62,8 @@ from config_harness import (  # noqa: E402 - after load_env, like llm_extract
 )
 
 SCRIPT_TIMEOUT = 60  # wall clock per probe script, seconds
-OUTPUT_TAIL = 4000  # chars of script stdout/stderr fed back to the model
+OUTPUT_TAIL = 12000  # chars of script stdout/stderr fed back to the model
+# (real statements are long; the model debugs through this window)
 MAX_TOKENS = 10000  # probe scripts are longer than config JSON
 PROBE_LIMIT = 3  # consecutive burner probes before a full script is required
 

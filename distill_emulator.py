@@ -171,6 +171,25 @@ def spans(line: dict) -> dict[str, tuple[int, int]]:
 # --- Table classification -----------------------------------------------------
 
 
+def section_markers(
+    lines: list[dict], markers: dict[str, str]
+) -> list[tuple[int, str]]:
+    """(line index, marker name) for every line containing one of the given
+    section markers, in document order — e.g.
+    section_markers(lines, {"withdrawals": "Withdrawals and other subtractions",
+                            "deposits": "Deposits and other additions"}).
+    Sectioned statements are common in the wild; classify your table per
+    section and pass per-section signed amounts to reconcile()."""
+    hits: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        text = line_text(line)
+        for name, marker in markers.items():
+            if marker in text:
+                hits.append((index, name))
+                break
+    return hits
+
+
 def region(
     lines: list[dict], start_term: str, stop_terms: tuple[str, ...] | list[str] = ()
 ) -> tuple[int, int]:
@@ -412,17 +431,36 @@ def signed_amounts(
 
 
 def reconcile(
-    amounts: list, opening, closing, tol: float = 0.01
+    amounts: list, opening, closing, balances: list | None = None, tol: float = 0.01
 ) -> bool:
     """Local mirror of the engine's balance checkers: opening + signed
     amounts must equal closing. Accepts floats or printed tokens (parsed
-    with an auto-detected format). Prints the verdict. ALWAYS run this on
-    the full signed amount column before calling build_config — it is the
-    cheapest signal that roles/formats are right."""
+    with an auto-detected format). When `balances` (the printed running
+    balance column, same length as amounts) is given, the first row where
+    opening + cumulative amounts diverges from the printed balance is
+    reported BY ROW — the exact debugging view a failing table needs.
+    ALWAYS run this before calling build_config."""
     global _LAST_RECONCILE_OK
     opening = _coerce_amount(opening, "opening")
     closing = _coerce_amount(closing, "closing")
     amounts = [_coerce_amount(a, "amount") for a in amounts]
+    if balances is not None and len(balances) == len(amounts):
+        running = opening
+        for index, (amount, printed) in enumerate(zip(amounts, balances)):
+            if printed is None or printed == []:
+                continue
+            printed = _coerce_amount(
+                printed[0] if isinstance(printed, list) else printed, "balance"
+            )
+            running += amount
+            if abs(running - printed) > tol:
+                print(
+                    f"reconcile: row {index} DIVERGES — running {running:,.2f} "
+                    f"vs printed balance {printed:,.2f} (amount {amount:+,.2f}); "
+                    "check this row's sign/role/region membership"
+                )
+                _LAST_RECONCILE_OK = False
+                return False
     running = opening + sum(amounts)
     drift = round(running - closing, 2)
     if abs(drift) <= tol:
