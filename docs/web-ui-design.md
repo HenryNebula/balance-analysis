@@ -132,6 +132,10 @@ data/                                   # gitignored (add "data/" to .gitignore)
 │   └── 20261009-141023-a1b2/
 │       ├── run.json                    # argv, account, statement ids, pid, status
 │       └── events.jsonl                # trajectory events (§9.1), copied from the run
+├── registry/                           # USER REGISTRY overlay: parsers distilled
+│   └── au__bank__product__1.py         # at runtime are USER DATA — saved here by
+│                                       # the harness, shadowing same-key built-ins;
+│                                       # never committed, never in package source
 └── cache/
     └── pages/<sha-prefix>/page_0.png   # lazily rasterized PDF pages (§9.3)
 ```
