@@ -231,11 +231,19 @@ def main() -> None:
         "copperkettle_checking": render_a(OUT / "copperkettle_checking.pdf"),
         "bluelantern_savings": render_b(OUT / "bluelantern_savings.pdf"),
     }
+    from statementledger.frames import frames_for
+
+    import tempfile
     for name, truth in fixtures.items():
         # the ledger the generator rendered must itself reconcile
         running = truth["opening_balance"] + sum(t["amount"] for t in truth["transactions"])
         assert abs(running - truth["closing_balance"]) < 0.005, name
         (OUT / f"{name}.truth.json").write_text(json.dumps(truth, indent=2))
+        # frames snapshot: the committed extraction of this PDF. A pdfplumber
+        # upgrade that changes geometry shows up here first.
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = frames_for([OUT / f"{name}.pdf"], Path(tmp))
+        (OUT / f"{name}.frames.json").write_text(json.dumps(frames, indent=2))
         print(f"{name}.pdf: {len(truth['transactions'])} transactions, "
               f"{truth['opening_balance']:,.2f} -> {truth['closing_balance']:,.2f}")
 
