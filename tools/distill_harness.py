@@ -49,7 +49,7 @@ load_env()
 
 import statementledger
 from statementledger.frames import frames_for
-from statementledger.registry import KEY_RE, REGISTRY
+from statementledger.registry import REGISTRY, key_problem
 
 # LLM endpoint (STATEMENTLEDGER_LLM_* in .env / environment; see .env.example)
 BASE_URL = os.environ.get("STATEMENTLEDGER_LLM_URL", "").rstrip("/")
@@ -149,6 +149,16 @@ statement, print it, reconcile.
 PY_CONTRACT = """Contract for every response:
 - ONE complete runnable python script in a single ```python fence: imports,
   KEY, def parse(frames), then the demo guarded by if __name__ == "__main__".
+- KEY is cc__bank__product__n, lowercase, derived from THE STATEMENT (its
+  country, its printed bank name, the account product) — never the template
+  filler words: exactly four '__'-separated segments, and the bank/product
+  segments must not be bare "bank"/"product"/"demo".
+- ONE ACCOUNT: parse(frames) returns the canonical dict. SEVERAL ACCOUNTS in
+  one PDF (repeated table headers, each with its own account number and
+  balances): return a LIST of canonical dicts, one per account — every
+  account table in the PDF must be covered, each ledger reconciles on its
+  own, and a verified single ledger over a multi-account PDF is PARTIAL
+  coverage the gate cannot see.
 - KEEP IT SHORT: under ~70 lines. No try/except anywhere — an error must
   crash; the harness feeds the exact traceback back to you.
 - Literals only for label terms / column header words — never for printed
@@ -247,8 +257,10 @@ lines). frames.json in the working directory holds it; pl.load_frames() reads
 it.
 
 Explore until the layout is clear (labels, header row, column spans, the
-words that end the table, wrapped-description rows), then write the parser:
-KEY + def parse(frames) returning the canonical dict, ending with the demo
+words that end the table, wrapped-description rows, EVERY account table if
+the PDF holds several accounts), then write the parser:
+KEY + def parse(frames) returning the canonical dict (or a LIST of dicts,
+one per account), ending with the demo
 under if __name__ == "__main__": print the parsed statement and reconcile.
 Return the complete script in one ```python fence.
 
@@ -267,16 +279,22 @@ spec = importlib.util.spec_from_file_location("candidate", Path("{candidate}.py"
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 verdict = pl.evaluate(module.parse, pl.load_frames(),
-                      key=getattr(module, "KEY", None))
+                      key=getattr(module, "KEY", None),
+                      expect_ledgers={expect_ledgers})
 print("GATE:" + json.dumps(verdict))
 '''
 
 
-def py_gate(workdir: Path, stem: str, trace: Trace) -> dict:
+def py_gate(workdir: Path, stem: str, trace: Trace,
+            pins: dict[str, int] | None = None) -> dict:
     """The engine gate: import workdir/<stem>.py in a fresh sandbox and run
     parse() on EVERY statement. Verdict shape matches evaluate(). Works for
-    round scripts (round_N) and the maintain-mode baseline alike."""
-    (workdir / f"gate_{stem}.py").write_text(GATE_RUNNER.format(candidate=stem))
+    round scripts (round_N) and the maintain-mode baseline alike. `pins`
+    (maintain mode only) carries the per-statement ledger counts of the
+    previously registered version, so maintenance cannot quietly drop or
+    split an account."""
+    (workdir / f"gate_{stem}.py").write_text(
+        GATE_RUNNER.format(candidate=stem, expect_ledgers=repr(pins)))
     outcome = run_script(workdir, f"gate_{stem}")
     verdict = None
     if outcome["returncode"] == 0:
@@ -289,12 +307,12 @@ def py_gate(workdir: Path, stem: str, trace: Trace) -> dict:
                    "results": [{"name": "gate", "ok": False, "rows": 0,
                                 "error": f"gate failed: {error}"}]}
     if verdict.get("verified"):
-        if not KEY_RE.match(verdict.get("key") or ""):
+        problem = key_problem(verdict.get("key") or "")
+        if problem:
             verdict["verified"] = False
             verdict["results"].append({
                 "name": "key", "ok": False, "rows": 0,
-                "error": (f"KEY {verdict.get('key')!r} must be "
-                          "cc__bank__product__n, lowercase"),
+                "error": problem,
             })
     trace.log(
         f"{stem} statementledger gate",
@@ -308,7 +326,10 @@ def py_feedback(evaluation: dict) -> str:
     lines = []
     for result in evaluation["results"]:
         if result["ok"]:
-            lines.append(f"  {result['name']}: OK — {result['rows']} transactions")
+            ledgers = result.get("ledgers", 1)
+            suffix = f" transactions in {ledgers} ledgers" if ledgers > 1 \
+                else " transactions"
+            lines.append(f"  {result['name']}: OK — {result['rows']}{suffix}")
         else:
             lines.append(f"  {result['name']}: FAILED — {result['error']}")
     return ("statementledger gate (parse() re-run on EVERY statement; schema "
@@ -332,7 +353,11 @@ already works for at least one statement. Rules of maintenance:
   that catch errors end-to-end reconcile mathematically cannot see.
 - You already hold the layout knowledge in the baseline code; probe (first
   line '# probe', as always) only what the baseline doesn't explain — e.g.
-  the failing statement's header row, its stop words, its money formats."""
+  the failing statement's header row, its stop words, its money formats.
+- The ONE restructure maintenance may not avoid: a statement holding SEVERAL
+  accounts needs parse() to return a LIST of canonical dicts, one per
+  account (each reconciles on its own) — even when the baseline's
+  single-account dict already verifies. Cover every account table."""
 
 MAINTAIN_TASK_TEMPLATE = """Maintaining the registered parser {key}.
 Statement set: {names}. frames.json in the working directory holds them all
@@ -685,6 +710,7 @@ def draft_by_repl(
     require_key: str | None = None,
     enforce_look_gate: bool = True,
     max_probes: int | None = None,
+    pins: dict[str, int] | None = None,
 ) -> tuple[dict | None, bool, list[dict]]:
     """Returns ({key, code} or None, verified?, round history). Maintain mode
     (require_key set) pins KEY to the registered parser being evolved;
@@ -905,7 +931,7 @@ def draft_by_repl(
         )
         artifact = None
         if outcome["returncode"] == 0 and "def parse(" in code:
-            evaluation = py_gate(workdir, f"round_{round_number}", trace)
+            evaluation = py_gate(workdir, f"round_{round_number}", trace, pins)
             if evaluation.get("clean", 0) > 0:
                 artifact = {"key": evaluation.get("key"), "code": code}
         else:
@@ -1047,6 +1073,7 @@ def main() -> int:
     require_key = None
     look_gate = True
     baseline = None
+    pins = None
     if args.key:
         source_path = REGISTRY / f"{args.key}.py"
         if not source_path.exists():
@@ -1066,6 +1093,15 @@ def main() -> int:
                   "statement(s) — nothing to maintain.")
             trace.close()
             return 0
+        # What the previous working version returned per statement is the
+        # coverage expectation for every round: maintenance may restructure,
+        # but never to fewer (or split) ledgers than the version being
+        # replaced — for the statements that version already verified.
+        pins = {result["name"]: result["ledgers"] for result in verdict["results"]
+                if result["ok"]}
+        if pins:
+            trace.log("coverage pins", json.dumps(pins))
+            print(f"coverage pinned from baseline: {pins}")
         first = frames["statements"][0]
         task_message = MAINTAIN_TASK_TEMPLATE.format(
             key=args.key,
@@ -1085,6 +1121,7 @@ def main() -> int:
         system_prompt=system, task_template=template,
         task_message=task_message, require_key=require_key,
         enforce_look_gate=look_gate, max_probes=args.max_probes,
+        pins=pins,
     )
     if artifact is None or not verified:
         trace.log("result", f"FAILED ({'no artifact' if artifact is None else 'not verified'})")
@@ -1122,14 +1159,15 @@ def main() -> int:
         spec.loader.exec_module(module)
         frames = frames_for(args.pdfs, workdir)["statements"]
         for pdf, stmt_frames in zip(args.pdfs, frames):
-            stmt = module.parse(stmt_frames)
-            line = (
-                f"  {pdf.name}: {len(stmt['transactions'])} transactions, "
-                f"opening {stmt['opening_balance']:,.2f} -> "
-                f"closing {stmt['closing_balance']:,.2f}"
-            )
-            print(line)
-            trace.line(line)
+            for ledger in statementledger.ledgers_of(module.parse(stmt_frames)):
+                line = (
+                    f"  {pdf.name} [{ledger['account_number']}]: "
+                    f"{len(ledger['transactions'])} transactions, "
+                    f"opening {ledger['opening_balance']:,.2f} -> "
+                    f"closing {ledger['closing_balance']:,.2f}"
+                )
+                print(line)
+                trace.line(line)
         trace.close()
         return 0
 
@@ -1142,14 +1180,15 @@ def main() -> int:
     trace.log("result", f"VERIFIED parser saved: {out_path}")
 
     for pdf in args.pdfs:
-        stmt = statementledger.parse(str(pdf), key=key)
-        line = (
-            f"  {pdf.name}: {len(stmt['transactions'])} transactions, "
-            f"opening {stmt['opening_balance']:,.2f} -> "
-            f"closing {stmt['closing_balance']:,.2f}"
-        )
-        print(line)
-        trace.line(line)
+        for ledger in statementledger.parse_all(str(pdf), key=key):
+            line = (
+                f"  {pdf.name} [{ledger['account_number']}]: "
+                f"{len(ledger['transactions'])} transactions, "
+                f"opening {ledger['opening_balance']:,.2f} -> "
+                f"closing {ledger['closing_balance']:,.2f}"
+            )
+            print(line)
+            trace.line(line)
     trace.close()
     return 0
 

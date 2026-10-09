@@ -45,12 +45,13 @@ def main() -> int:
                "verifiers": []}
         for key in key_names:
             if sl.evaluate(load_module(key).parse, statements)["verified"]:
-                stmt = load_module(key).parse(statements[0])
+                ledgers = sl.ledgers_of(load_module(key).parse(statements[0]))
+                n_txns = sum(len(ledger["transactions"]) for ledger in ledgers)
                 row["verifiers"].append({
-                    "key": key, "n_txns": len(stmt["transactions"]),
-                    "txns_match_meta": len(stmt["transactions"]) == m["transactionCount"],
-                    "bank": stmt["bank_name"], "account": stmt["account_number"],
-                    "opening": stmt["opening_balance"], "closing": stmt["closing_balance"],
+                    "key": key, "n_txns": n_txns,
+                    "txns_match_meta": n_txns == m["transactionCount"],
+                    "banks": [ledger["bank_name"] for ledger in ledgers],
+                    "accounts": [ledger["account_number"] for ledger in ledgers],
                 })
         report[mid] = row
 

@@ -106,6 +106,92 @@ def test_reconcile_catches_unreadable_anchor():
         sl.reconcile([1.0], "not money", 1.0)
 
 
+# --- multi-account PDFs: parse() may return a LIST of ledgers ------------------
+
+
+def test_ledgers_of():
+    assert sl.ledgers_of(good_statement()) == [good_statement()]
+    two = [good_statement(), good_statement()]
+    assert sl.ledgers_of(two) is two
+
+
+def test_validate_accepts_ledger_list():
+    ledgers = [good_statement(account_number="817-1"),
+               good_statement(account_number="817-2")]
+    assert sl.validate(ledgers) == []
+
+
+def test_validate_empty_ledger_list_is_an_error():
+    errors = sl.validate([])
+    assert errors and "empty list" in errors[0]
+
+
+def test_validate_names_the_broken_ledger():
+    ledgers = [good_statement(account_number="817-1"),
+               good_statement(account_number="817-2", transactions=[])]
+    errors = sl.validate(ledgers)
+    assert errors and errors[0].startswith("ledger 1 (817-2):")
+    assert "transactions is empty" in errors[0]
+
+
+def test_reconcile_statement_gates_each_ledger():
+    ledgers = [good_statement(account_number="817-1"),
+               good_statement(account_number="817-2", closing_balance=800.0)]
+    failure = sl.reconcile_statement(ledgers)
+    assert failure and failure.startswith("ledger 1 (817-2):")
+
+
+def test_evaluate_multi_ledger_verdict():
+    statement = {"name": "x.pdf", "lines": []}
+
+    def parse_fn(frames):
+        return [good_statement(), good_statement()]
+
+    verdict = sl.evaluate(parse_fn, [statement])
+    assert verdict["verified"]
+    assert verdict["results"][0]["rows"] == 2      # summed across ledgers
+    assert verdict["results"][0]["ledgers"] == 2
+
+
+def test_evaluate_multi_ledger_one_broken_fails_all():
+    statement = {"name": "x.pdf", "lines": []}
+
+    def parse_fn(frames):
+        return [good_statement(), good_statement(closing_balance=800.0)]
+
+    verdict = sl.evaluate(parse_fn, [statement])
+    assert not verdict["verified"]
+    assert "ledger 1" in verdict["results"][0]["error"]
+
+
+def test_evaluate_coverage_pins_gate_partial_coverage():
+    statement = {"name": "x.pdf", "lines": []}
+
+    def one_ledger(frames):
+        return good_statement()   # reconciles — but covers 1 of 2 accounts
+
+    verdict = sl.evaluate(one_ledger, [statement], expect_ledgers={"x.pdf": 2})
+    assert not verdict["verified"]
+    assert "coverage" in verdict["results"][0]["error"]
+
+    def two_ledgers(frames):
+        return [good_statement(), good_statement()]
+
+    assert sl.evaluate(two_ledgers, [statement],
+                       expect_ledgers={"x.pdf": 2})["verified"]
+
+
+def test_evaluate_coverage_pins_only_pinned_statements():
+    # statements absent from the pin map carry no expectation
+    statement = {"name": "x.pdf", "lines": []}
+
+    def one_ledger(frames):
+        return good_statement()
+
+    assert sl.evaluate(one_ledger, [statement],
+                       expect_ledgers={"other.pdf": 2})["verified"]
+
+
 def test_evaluate_verdict_on_crash_with_hint():
     def crash(frames):
         return frames["lines"][0]["items"]["page"]  # list subscripted by str

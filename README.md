@@ -9,6 +9,8 @@ stmt = sl.parse("statement.pdf", key="us__bank__product__1")
 # {'bank_name': ..., 'account_number': ..., 'opening_balance': ...,
 #  'closing_balance': ..., 'transactions': [{'date': 'YYYY-MM-DD',
 #   'description': ..., 'amount': ..., 'balance': ...}, ...]}
+# A multi-account PDF (several accounts, each with its own balances) returns
+# a LIST of these, one per account — sl.parse_all(pdf) normalizes to a list.
 ```
 
 Or from the shell:

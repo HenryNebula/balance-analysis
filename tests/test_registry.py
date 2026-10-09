@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import statementledger as sl
+from statementledger.registry import key_problem
 
 FIXTURES = Path(__file__).parent / "fixtures"
 CASES = [
@@ -61,3 +62,41 @@ def test_cross_fixture_no_false_positive():
 def test_unregistered_key_is_an_error():
     with pytest.raises((ValueError, FileNotFoundError)):
         sl.load_module("us__nosuch__bank__product__9")
+
+
+@pytest.mark.parametrize("pdf,key", CASES)
+def test_public_parse_all_normalizes_single_ledger(pdf, key):
+    ledgers = sl.parse_all(str(FIXTURES / pdf), key=key)
+    assert isinstance(ledgers, list) and len(ledgers) == 1
+    assert ledgers[0]["_key"] == key
+    assert sl.reconcile_statement(ledgers[0]) is None
+
+
+# --- key_problem: the gate that keeps template placeholders out of the registry
+
+@pytest.mark.parametrize("key,fragment", [
+    # the shipped bug: KEY_RE passes but '__' splits into 5 segments
+    ("us__bank__liberty_national__credit__1", "segments"),
+    # unreplaced template bank / filler product segments
+    ("us__bank__checking__1", "placeholder"),
+    ("ca__harbour__bank__1", "placeholder"),
+    ("us__demo__checking__1", "placeholder"),
+    # shape failures
+    ("US__Bank__Checking__1", "lowercase"),
+    ("us__copperkettle__checking", "want cc__bank__product__n"),
+    # real keys pass
+    ("us__copperkettle__checking__1", None),
+    ("sg__standard_chartered__savings__1", None),
+    ("ca__harbour_bank__business__1", None),
+])
+def test_key_problem(key, fragment):
+    problem = key_problem(key)
+    if fragment is None:
+        assert problem is None
+    else:
+        assert problem and fragment in problem
+
+
+def test_placeholder_key_cannot_load():
+    with pytest.raises(ValueError, match="placeholder"):
+        sl.load_module("us__bank__checking__1")

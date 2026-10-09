@@ -10,13 +10,15 @@ not fails the gate no matter how plausible its output looks.
 A registry artifact is a Python module defining
 
     KEY = "us__bank__product__1"
-    def parse(frames) -> dict: ...   # pure; canonical statement dict
+    def parse(frames) -> dict | list[dict]: ...   # pure; canonical dict(s)
 
 frames is the extracted layout (see statementledger.frames): one statement
 dict {"name": str, "lines": [{"page", "y", "items": [[text, x1, x2], ...]},
 ...]}. parse() derives everything from it at runtime (no transcribed
 amounts/dates/descriptions), so a registered module parses FUTURE months of
-the same bank with zero LLM.
+the same bank with zero LLM. A PDF holding SEVERAL accounts (repeated table
+headers, each with its own account number and balances) gets a LIST of
+canonical dicts — one per account, each gated on its own arithmetic.
 
 stdlib only; runs both inside the distill sandbox and at reuse time.
 """
@@ -241,15 +243,34 @@ CANONICAL_FIELDS = ("bank_name", "account_number", "opening_balance",
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def ledgers_of(result) -> list:
+    """A parse() result as a list of ledger dicts: single-account parsers
+    return one dict, multi-account parsers (one PDF, several accounts, each
+    with its own balances) return a LIST of dicts, one per account."""
+    return result if isinstance(result, list) else [result]
+
+
 def validate(stmt) -> list[str]:
-    """Schema errors of a parse() result (empty list = valid). Every message
-    names the offending field/row and the fix — these strings are exactly
-    what the distill gate feeds back to the drafter."""
+    """Schema errors of a parse() result (empty list = valid): one canonical
+    dict, or a LIST of them for a multi-account PDF. Every message names the
+    offending field/row and the fix — these strings are exactly what the
+    distill gate feeds back to the drafter."""
     canonical = ("{bank_name, account_number, opening_balance, "
                  "closing_balance, transactions}")
+    if isinstance(stmt, list):
+        if not stmt:
+            return ["parse() returned an empty list — a multi-account PDF "
+                    "needs one canonical dict PER account"]
+        errors = []
+        for index, ledger in enumerate(stmt):
+            label = (ledger.get("account_number", "?")
+                     if isinstance(ledger, dict) else "?")
+            errors.extend(f"ledger {index} ({label}): {error}"
+                          for error in validate(ledger))
+        return errors
     if not isinstance(stmt, dict):
         return [f"parse() returned {type(stmt).__name__}, not the canonical "
-                f"dict {canonical}"]
+                f"dict {canonical} (or a list of them, one per account)"]
     errors = []
     for field in CANONICAL_FIELDS:
         if field not in stmt:
@@ -364,9 +385,10 @@ def _crash_hint(error: BaseException) -> str:
 TOTAL_KINDS = ("positive", "negative", "all")
 
 
-def reconcile_statement(stmt: dict, tol: float = TOL) -> str | None:
-    """Ledger check on a parsed statement: None when it reconciles, else the
-    first divergence (closing drift, the row whose printed balance breaks
+def reconcile_statement(stmt, tol: float = TOL) -> str | None:
+    """Ledger check on a parsed statement (a dict, or a list of them for a
+    multi-account PDF): None when every ledger reconciles, else the first
+    divergence (closing drift, the row whose printed balance breaks
     the running sum, or a printed section total that misses its parsed sum).
     Interpreting the message:
     - one row diverges, the rest track -> that row's sign or column binding
@@ -381,6 +403,14 @@ def reconcile_statement(stmt: dict, tol: float = TOL) -> str | None:
       the balance chain instead of read from the amount column — errors
       end-to-end reconcile mathematically cannot see
     """
+    if isinstance(stmt, list):
+        for index, ledger in enumerate(stmt):
+            failure = reconcile_statement(ledger, tol)
+            if failure:
+                label = (ledger.get("account_number", "?")
+                         if isinstance(ledger, dict) else "?")
+                return f"ledger {index} ({label}): {failure}"
+        return None
     errors = validate(stmt)
     if errors:
         return errors[0]
@@ -417,16 +447,24 @@ def reconcile_statement(stmt: dict, tol: float = TOL) -> str | None:
     return None
 
 
-def evaluate(parse_fn, statements: list[dict], key: str | None = None) -> dict:
+def evaluate(parse_fn, statements: list[dict], key: str | None = None,
+             expect_ledgers: dict[str, int] | None = None) -> dict:
     """Run parse_fn over every statement; the verdict the harness consumes:
-    {key, stage, results: [{name, ok, rows, error}], clean, verified}. The
-    error strings are the drafter's feedback: crashes carry a remedial hint
-    for known shapes (see _crash_hint), schema violations name the row and
-    the fix, and reconcile failures name the divergent row."""
+    {key, stage, results: [{name, ok, rows, ledgers, error}], clean, verified}.
+    The error strings are the drafter's feedback: crashes carry a remedial
+    hint for known shapes (see _crash_hint), schema violations name the row
+    and the fix, and reconcile failures name the divergent row.
+    expect_ledgers (optional): per-statement ledger counts {statement name:
+    count} pinned from a PREVIOUSLY VERIFIED version — maintenance must keep
+    returning the same count per statement. Arithmetic that reconciles over
+    a different number of ledgers is partial (or split) coverage the gate
+    cannot otherwise see, so it fails with a coverage error instead of
+    verifying. Statements absent from the map carry no expectation."""
     results = []
     clean = 0
     for frames in statements:
         entry = {"name": frames["name"], "ok": False, "rows": 0, "error": ""}
+        expected = (expect_ledgers or {}).get(frames["name"])
         try:
             stmt = parse_fn(frames)
         except Exception as error:  # noqa: BLE001 - the verdict IS the catcher
@@ -444,9 +482,20 @@ def evaluate(parse_fn, statements: list[dict], key: str | None = None) -> dict:
             if failure:
                 entry["error"] = f"reconcile: {failure}"
             else:
-                entry["ok"] = True
-                entry["rows"] = len(stmt["transactions"])
-                clean += 1
+                ledgers = ledgers_of(stmt)
+                entry["rows"] = sum(len(l["transactions"]) for l in ledgers)
+                entry["ledgers"] = len(ledgers)
+                if expected is not None and len(ledgers) != expected:
+                    entry["error"] = (
+                        f"coverage: parse() returned {len(ledgers)} ledger(s) "
+                        f"but the registered parser returned {expected} for "
+                        "this statement — keep every account covered (a LIST "
+                        "with one canonical dict PER account); arithmetic that "
+                        "reconciles over a subset of the accounts is partial "
+                        "coverage")
+                else:
+                    entry["ok"] = True
+                    clean += 1
         results.append(entry)
     return {"key": key, "stage": "parse", "results": results, "clean": clean,
             "verified": clean == len(statements) and clean > 0}
