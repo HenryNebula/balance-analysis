@@ -88,6 +88,66 @@ STR_FIELDS = {"bank_name"}
 KEY_RE = re.compile(r"^[a-z]{2}__[a-z0-9_]+__[a-z0-9_]+__\d+$")
 
 
+# --- Layout primitives: plain data + freedom ------------------------------------
+#
+# The shaped helpers (table, classify, region) are POLICIES — conveniences
+# for the common ledger. When a statement's shape doesn't fit one, the model
+# should drop to these PRIMITIVES and plain python/re, not force the tool.
+
+def tokens(lines: list[dict]) -> list[tuple]:
+    """Flat printed-item stream with geometry: (text, x1, x2, y, page,
+    line_index). The substrate — loop it, filter it, regex it, cluster it."""
+    stream = []
+    for index, line in enumerate(lines):
+        for text, x1, x2 in line["items"]:
+            stream.append((text, x1, x2, line["y"], line["page"], index))
+    return stream
+
+
+def cluster_x(items: list[tuple], gap: float = 20) -> list[tuple[float, list]]:
+    """1-D clustering of items by x-center into column groups:
+    [(center, [items...]), ...] left to right. Use it to find column
+    structure the header row didn't declare cleanly (wide or irregular
+    layouts, multi-line description columns)."""
+    ordered = sorted(items, key=lambda t: (t[1] + t[2]) / 2)
+    groups: list[list] = []
+    for item in ordered:
+        center = (item[1] + item[2]) / 2
+        if groups and center - groups[-1][0] <= gap:
+            group = groups[-1]
+            group[0] = (group[0] * len(group[1]) + center) / (len(group[1]) + 1)
+            group[1].append(item)
+        else:
+            groups.append([center, [item]])
+    return [(round(center, 1), items_) for center, items_ in groups]
+
+
+def date_format_histogram(texts: list[str]) -> dict[str | None, list[str]]:
+    """Which engine date format ids cover the given samples:
+    {format id: [matching samples]} (plus None: [unmatchable]). Pick
+    *_formats values from this evidence, never by guessing."""
+    histogram: dict[str | None, list[str]] = {}
+    for text in texts:
+        matches = date_format_of(str(text))
+        if matches:
+            for name in matches:
+                histogram.setdefault(name, []).append(str(text))
+        else:
+            histogram.setdefault(None, []).append(str(text))
+    return dict(sorted(histogram.items(), key=lambda kv: -len(kv[1])))
+
+
+def amount_format_histogram(texts: list[str]) -> dict[str | None, list[str]]:
+    """Which engine amount format ids cover the given samples:
+    {format id: [matching samples]} (plus None: [unmatchable — no engine
+    format can read them])."""
+    histogram: dict[str | None, list[str]] = {}
+    for text in texts:
+        name = amount_format_of([str(text)])
+        histogram.setdefault(name, []).append(str(text))
+    return dict(sorted(histogram.items(), key=lambda kv: -len(kv[1])))
+
+
 # --- Frames -------------------------------------------------------------------
 
 
@@ -608,12 +668,12 @@ def reconcile(
     if balances is not None and len(balances) == len(amounts):
         running = opening
         for index, (amount, printed) in enumerate(zip(amounts, balances)):
+            running += amount  # always accumulate, even on balance-less rows
             if printed is None or printed == []:
                 continue
             printed = _coerce_amount(
                 printed[0] if isinstance(printed, list) else printed, "balance"
             )
-            running += amount
             if abs(running - printed) > tol:
                 print(
                     f"reconcile: row {index} DIVERGES — running {running:,.2f} "
@@ -741,6 +801,22 @@ def build_config(**fields) -> dict:
         if fields[name] not in ALIGNMENTS:
             raise ValueError(
                 f"{name}: {fields[name]!r} not in {sorted(ALIGNMENTS)}"
+            )
+    if "account_number_patterns" in fields:
+        # The engine's account-number matcher silently rejects patterns
+        # using groups/alternation — semantically correct regexes still fail
+        # ("Missing required fields: account number" for rounds on end).
+        # The safe dialect is explicit digit-run shapes: \d{n} plus escaped
+        # literals, exactly what pattern_for() emits.
+        bad = [
+            p for p in fields["account_number_patterns"] if "(" in p or "|" in p
+        ]
+        if bad:
+            raise ValueError(
+                f"account_number_patterns {bad} use groups/alternation the "
+                "engine's matcher silently rejects. Write the shape with "
+                "explicit runs, e.g. pattern_for(printed_value) -> "
+                "'\\d{4} \\d{4} \\d{4} \\d{4}'"
             )
     if "transaction_formats" in fields:
         for order in fields["transaction_formats"]:

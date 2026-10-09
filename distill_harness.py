@@ -26,6 +26,7 @@ registered.
 Usage (from balance-analysis/):
     uv run python distill_harness.py statement1.pdf [statement2.pdf ...]
     uv run python distill_harness.py --script canned_probe.py stmt.pdf
+    uv run python distill_harness.py --py stmt1.pdf [stmt2.pdf ...]  # pyledger
 """
 
 from __future__ import annotations
@@ -69,6 +70,21 @@ MAX_TOKENS = 10000  # probe scripts are longer than config JSON
 EMU_API = """Working environment (your script runs with the statement frames
 already on disk; import and go):
 - import distill_emulator as emu
+- THE EMULATOR IS INTROSPECTABLE at runtime: every function's full
+  docstring and signature are one print away — print(emu.table.__doc__),
+  print(inspect.signature(emu.classify)), or help(emu) in a probe. The
+  summaries above are a map, not the manual.
+- THE FRAMES ARE PLAIN DATA: lines is a list of {"page","y","items":
+  [[text,x1,x2],...]} dicts. Every emu.* helper is a CONVENIENCE, not a
+  gate — when a statement's shape doesn't fit one (wide multi-line columns,
+  odd sections), drop to plain python/re on the frames and write your own
+  grouping/clustering. Full freedom; the checks (reconcile, engine gate)
+  stay deterministic.
+- emu.tokens(lines) — flat (text,x1,x2,y,page,line_index) item stream.
+- emu.cluster_x(items, gap=20) — 1-D x-center clustering into column groups.
+- emu.date_format_histogram(texts) / emu.amount_format_histogram(texts) —
+  {format id: [samples]} coverage of your actual tokens; choose *_formats
+  ids from this evidence, never by guessing.
 - emu.table(lines, stop_terms=[...], sections={label: marker}) — MATERIALIZE
   THE LEDGER GRID: columns from the header row, cells assigned by header
   span, page furniture dropped, wrapped rows merged, optional per-row
@@ -195,6 +211,10 @@ CONTRACT = f"""Contract for every response:
   comments, no retry loops. The example is the maximum sensible size.
 - NEVER use try/except: an error must crash the script — the harness feeds
   the exact traceback back to you. Swallowed errors hide the bug from you.
+- Helpers are conveniences, not constraints: when the layout doesn't fit
+  a helper (wide multi-line description columns, odd grouping), write
+  plain python/re directly on the frames — tokens(), cluster_x(), or your
+  own loops — instead of forcing a shaped tool.
 - Read what YOUR OWN probes printed: use the exact printed label words, not
   generic guesses like "Transactions" or "End of Statement".
 - BURNER PROBES: to just LOOK at something before committing, return a short
@@ -237,6 +257,73 @@ and length, not its literal labels:
 {EXAMPLE_SCRIPT}
 """
 
+LEAN_EXAMPLE = '''import lean_emulator as le
+import pandas as pd
+
+df = le.frames()
+print(df.head(15))                       # the statement, one row per item
+print(df.groupby("page").size())
+
+lines = df.groupby(["page", "line"]).agg(  # visual lines as text spans
+    text=("text", " ".join), x1=("x1", "min"), x2=("x2", "max"),
+).reset_index()
+print(lines.head(30))
+print(lines.tail(6))                     # find the words that END the table
+
+# anchors: labels are lines; values sit right of them
+opening_row = df[df.line == df[df.text.str.contains("Opening", regex=False)].line.iloc[0]]
+print(opening_row)                       # read the value off the same line
+
+# column structure from geometry (headers or clustering)
+header_line = lines[lines.text.str.contains("Date") & lines.text.str.contains("Balance")].line.iloc[0]
+head = df[df.line == header_line].sort_values("cx")
+print(head[["text", "x1", "x2"]])        # column names and their spans
+
+# the grid: assign items to the nearest header span, rows = lines
+region = df[df.line > header_line]
+region = region[region.line < lines[lines.text.str.contains("End of transactions", regex=False)].line.iloc[0]]
+edges = [float("-inf")] + [ (a + b) / 2 for a, b in zip(head.cx, head.cx.tolist()[1:]) ] + [float("inf")]
+grid = region.assign(col=pd.cut(region.cx, bins=edges, labels=head.text.tolist())
+).pivot_table(index="line", columns="col", values="text", aggfunc=" ".join)
+print(grid.head(12))
+
+# formats from EVIDENCE: histograms of what the engine can actually read
+amounts = grid.get("Credit").dropna().tolist() + grid.get("Debit").dropna().tolist()
+print(le.amount_format_histogram(amounts))
+print(le.date_format_histogram(grid.get("Date").dropna().tolist()))
+
+le.build_config(
+    key="us__demo__checking__1",
+    # ... the same kwargs as the engine config: terms from the lines you
+    # read, formats from the histograms, transaction_formats from the
+    # grid's column-presence shapes, alignments from the header spans.
+)'''
+
+LEAN_SYSTEM_PROMPT = f"""You are a data analyst who parses bank statement
+layouts with pandas. le.frames() hands you the statement as a DataFrame
+(one row per printed item: text, x1, x2, cx, y, page, line; y grows
+downward). Explore FREELY with pandas/numpy — group, cut, cluster, regex,
+pivot; there is no API to obey, only data to understand.
+
+The deliverable is unchanged: a transtractor config. The LAST line of your
+full script is le.build_config(**fields) — kwargs are exactly the engine's
+config fields, validated on the spot. Two helps: amount_format_histogram()
+/ date_format_histogram() show which engine format ids cover your actual
+tokens (pick ids from evidence, never guessing), and reconcile() mirrors
+the engine's balance check locally.
+
+{FIELD_GUIDE}
+
+{FORMAT_CATALOG}
+
+{CONTRACT}
+
+Worked example (demo bank — imitate the pandas idiom, not its labels):
+```python
+{LEAN_EXAMPLE}
+```"""
+
+
 TASK_TEMPLATE = """Statement to parse: {name} ({pages} pages, {lines} layout
 lines). frames.json in the working directory already holds it.
 
@@ -264,6 +351,187 @@ lines = emu.load_frames()[0]["lines"]
 emu.show(lines, 6, len(lines) - 6)
 
 It is discarded; then return the complete full script with what you read."""
+
+
+LEAN_TASK_TEMPLATE = """Statement to parse: {name} ({pages} pages, {lines} layout
+lines). frames.json in the working directory holds it; le.frames() returns
+it as a DataFrame.
+
+Explore with pandas until the layout is clear (lines, header spans, the
+grid, section boundaries if any, the words that end the table), verify the
+amounts reconcile against the printed opening/closing balances, then
+return the complete full script ending in le.build_config(...) with
+parameters chosen from evidence. Return it in one ```python fence.
+
+When unsure what a label or stop word says, first return a BURNER PROBE —
+a short script whose first line is exactly "# probe" that prints what you
+need (le.frames().head(), a groupby, a tail slice). Discarded; then the
+full script."""
+
+
+# --- py mode: the artifact IS the parser (pyledger engine) ----------------------
+
+PY_SYSTEM_PROMPT = """You are a data scientist writing bank-statement parsers
+in plain Python. A statement arrives as FRAMES — extracted layout, plain data:
+
+    {"name": ..., "lines": [{"page": int, "y": int, "items": [[text, x1, x2], ...]}, ...]}
+
+y grows downward; items on a line are in print order. A ledger is a geometry
+problem: the header row names the columns, every item's x-center falls under
+one of them, and label values (account number, opening/closing balance) sit
+on the same line as their label. pandas or plain loops solve it.
+
+Your deliverable — a complete parser module. Nothing else persists:
+
+    KEY = "us__bank__product__1"     # registry key, lowercase
+    def parse(frames) -> dict:       # pure: derives everything from frames
+        ...
+        return {
+            "bank_name": str,
+            "account_number": str,
+            "opening_balance": float,
+            "closing_balance": float,
+            "transactions": [
+                {"date": "YYYY-MM-DD" or None,  # yearless tokens: take the
+                 "description": str,             # year from the statement period
+                 "amount": float,                # SIGNED: credits +, debits -
+                 "balance": float or None},      # printed running balance, if any
+            ],
+        }
+
+Rules of the artifact:
+- parse() may import ONLY the stdlib (re, datetime, json, collections, ...)
+  plus pandas/numpy and pyledger. No files, network, or processes; no
+  try/except — errors must crash loudly.
+- No literals for printed amounts, dates, or transaction descriptions (the
+  lint rejects them). Label TERMS like "Opening balance:" are bank
+  furniture — literals are fine and expected.
+- It must generalize across months of THIS bank: derive columns from each
+  statement's own header row and stop terms from the words it prints; never
+  hardcode one month's geometry or contents.
+
+Sandbox environment (import and go):
+- import pyledger as pl
+- THE DOCSTRINGS ARE THE MANUAL: every helper's full contract, examples and
+  failure modes are one print away — print(pl.parse_amount.__doc__),
+  print(pl.reconcile.__doc__), help(pl).
+- pl.load_frames() -> the statements' frames LIST (frames.json in cwd).
+  parse() receives ONE element of it: a single statement dict
+  {"name": ..., "lines": [...]} — the #1 drafting crash is treating frames
+  as something else.
+- pl.show(lines, n=15, start=0) — layout slice with line indices
+- pl.items(frames) -> [{text, x1, x2, cx, y, page, line}] per printed item —
+  pd.DataFrame(pl.items(frames)) and wrangle freely
+- pl.parse_amount("$1,234.56 DR") -> signed float (CR +, DR -, parens
+  negate); None for unreadable tokens — None is NOT zero, it means "no
+  money here" (a description-wrap line)
+- pl.parse_date("05 Mar", default_year=2026) -> "2026-03-05"; None if not
+  date-shaped
+- pl.reconcile(amounts, opening, closing, balances=None) — the ledger check;
+  must print OK before you finish
+
+Verification is arithmetic, not opinion: the harness imports your module and
+runs parse() on EVERY statement given; each must yield a valid canonical dict
+AND reconcile (opening + sum(amounts) == closing; printed balances must track
+when present). Every gate error is remedial — crashes carry a HINT, schema
+errors name the row and the fix, reconcile failures name the divergent row.
+Read the error; it describes exactly what to change. End the script with a
+demo guarded by if __name__ == "__main__": parse the first statement, print
+it, reconcile.
+"""
+
+PY_CONTRACT = """Contract for every response:
+- ONE complete runnable python script in a single ```python fence: imports,
+  KEY, def parse(frames), then the demo guarded by if __name__ == "__main__".
+- KEEP IT SHORT: under ~70 lines. No try/except anywhere — an error must
+  crash; the harness feeds the exact traceback back to you.
+- Literals only for label terms / column header words — never for printed
+  amounts, dates, or transaction descriptions.
+- BURNER PROBES: to just LOOK before committing, first line exactly
+  "# probe" (print anything). Probes are discarded and uncapped, but they
+  cannot converge the run; from 90% of turns used onward you are warned.
+- MANDATORY LOOKING: your first full script is not accepted until probes
+  have shown the TOP and the END of the statement — the words that
+  terminate the table are at the end. Read them, never guess.
+- Never finish while your own pl.reconcile prints FAIL — the drift names
+  what is wrong (a stop term cutting the table early, a dropped row, a
+  wrong sign)."""
+
+PY_TASK_TEMPLATE = """Statement to parse: {name} ({pages} pages, {lines} layout
+lines). frames.json in the working directory holds it; pl.load_frames() reads
+it.
+
+Explore until the layout is clear (labels, header row, column spans, the
+words that end the table, wrapped-description rows), then write the parser:
+KEY + def parse(frames) returning the canonical dict, ending with the demo
+under if __name__ == "__main__": print the parsed statement and reconcile.
+Return the complete script in one ```python fence.
+
+When unsure what a label or stop word says, first return a BURNER PROBE —
+first line "# probe", print what you need (pl.show(...) slices). It is
+discarded; then return the full script."""
+
+GATE_RUNNER = '''import importlib.util
+import json
+from pathlib import Path
+
+import pyledger as pl
+
+spec = importlib.util.spec_from_file_location("candidate", Path("{candidate}.py"))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+verdict = pl.evaluate(module.parse, pl.load_frames(),
+                      key=getattr(module, "KEY", None))
+print("GATE:" + json.dumps(verdict))
+'''
+
+
+def py_gate(workdir: Path, round_number: int, trace: Trace) -> dict:
+    """The py-mode engine gate: import the round's module in a fresh sandbox
+    and run parse() on EVERY statement. Verdict shape matches the config
+    engine's evaluate() so the loop's bookkeeping is unchanged."""
+    gate_name = f"gate_{round_number}"
+    (workdir / f"{gate_name}.py").write_text(
+        GATE_RUNNER.format(candidate=f"round_{round_number}")
+    )
+    outcome = run_script(workdir, gate_name)
+    verdict = None
+    if outcome["returncode"] == 0:
+        match = re.search(r"^GATE:(\{.*\})$", outcome["stdout"], re.M)
+        if match:
+            verdict = json.loads(match.group(1))
+    if verdict is None:
+        error = outcome["stderr"][-400:] or outcome["stdout"][-200:]
+        verdict = {"key": None, "stage": "parse", "clean": 0, "verified": False,
+                   "results": [{"name": "gate", "ok": False, "rows": 0,
+                                "error": f"gate failed: {error}"}]}
+    if verdict.get("verified"):
+        import pyledger
+
+        if not pyledger.KEY_RE.match(verdict.get("key") or ""):
+            verdict["verified"] = False
+            verdict["results"].append({
+                "name": "key", "ok": False, "rows": 0,
+                "error": (f"KEY {verdict.get('key')!r} must be "
+                          "cc__bank__product__n, lowercase"),
+            })
+    trace.log(
+        f"round {round_number} pyledger gate",
+        f"exit {outcome['returncode']}\n{json.dumps(verdict, default=str)}",
+    )
+    return verdict
+
+
+def py_feedback(evaluation: dict) -> str:
+    """Per-statement verdict lines for a py-mode round."""
+    lines = []
+    for result in evaluation["results"]:
+        if result["ok"]:
+            lines.append(f"  {result['name']}: OK — {result['rows']} transactions")
+        else:
+            lines.append(f"  {result['name']}: FAILED — {result['error']}")
+    return ("pyledger gate (parse() re-run on EVERY statement; schema + "
+            "reconcile required):\n" + "\n".join(lines))
 
 
 # --- LLM transport (raw code, not json_object) --------------------------------
@@ -431,7 +699,7 @@ def _child_limits() -> None:
     for limit, value in (
         (resource.RLIMIT_CPU, (30, 30)),
         (resource.RLIMIT_FSIZE, (8 << 20, 8 << 20)),
-        (resource.RLIMIT_AS, (512 << 20, 512 << 20)),
+        (resource.RLIMIT_AS, (1536 << 20, 1536 << 20)),  # pandas headroom
         (resource.RLIMIT_NOFILE, (64, 64)),
     ):
         try:
@@ -637,9 +905,19 @@ def draft_by_repl(
     rounds: int,
     trace: Trace,
     canned_script: Path | None = None,
+    system_prompt: str = SYSTEM_PROMPT,
+    task_template: str = TASK_TEMPLATE,
+    engine: str = "config",
 ) -> tuple[dict | None, bool, list[dict]]:
-    """Returns (best config or None, verified?, round history)."""
-    frames, layout_text = frames_for(pdfs, workdir)
+    """Returns (best artifact or None, verified?, round history). The artifact
+    is a config dict (engine='config') or {'key', 'code'} for a pyledger
+    parser module (engine='py')."""
+    if engine == "py":
+        import pyledger
+
+        frames, layout_text = pyledger.frames_for(pdfs, workdir)
+    else:
+        frames, layout_text = frames_for(pdfs, workdir)
     first = frames["statements"][0]
     trace.log(
         "frames",
@@ -663,14 +941,14 @@ def draft_by_repl(
         if canned_script is not None:
             code = canned_script.read_text()
         else:
-            task = TASK_TEMPLATE.format(
+            task = task_template.format(
                 name=first["name"],
                 pages=1 + max(line["page"] for line in first["lines"]),
                 lines=len(first["lines"]),
             )
             if not messages:
                 messages = [
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": task},
                 ]
             saved = compact_messages(messages)
@@ -743,15 +1021,21 @@ def draft_by_repl(
             if probes_done < 1:
                 instruction = (
                     "Return a burner probe (first line exactly '# probe') "
-                    "printing the TOP of the statement: emu.show(lines, 12)."
+                    "printing the TOP of the statement: "
+                    + ("pl.show(pl.load_frames()[0]['lines'], 12)."
+                       if engine == "py" else "emu.show(lines, 12).")
                 )
                 reason = "no probe yet"
             else:
+                show_tail = (
+                    "pl.show(lines, 6, len(lines) - 6)" if engine == "py"
+                    else "emu.show(lines, 6, len(lines) - 6)"
+                )
                 instruction = (
                     "Your probes have not shown the END of the statement — "
                     "the words that terminate the transaction table live "
                     "there. Return a burner probe (first line '# probe'): "
-                    "emu.show(lines, 6, len(lines) - 6), and READ what "
+                    f"{show_tail}, and READ what "
                     "follows the last transaction row."
                 )
                 reason = "tail not probed"
@@ -767,7 +1051,7 @@ def draft_by_repl(
                 {"round": round_number, "outcome": f"full script gated: {reason}"}
             )
             continue
-        if is_probe and "build_config(" in code:
+        if is_probe and "build_config(" in code and engine != "py":
             feedback = (
                 "A probe must NOT call emu.build_config — probes are burner "
                 "turns. Remove the '# probe' first line to submit the full "
@@ -815,30 +1099,64 @@ def draft_by_repl(
             continue
         consecutive_probes = 0
 
-        (workdir / "config.json").unlink(missing_ok=True)
-        outcome = run_script(workdir, f"round_{round_number}")
-        trace.log(
-            f"round {round_number} script output",
-            f"exit {outcome['returncode']} in {outcome['elapsed']:.1f}s\n"
-            f"{outcome['stdout'][-4000:]}\n--- stderr ---\n{outcome['stderr'][-2000:]}",
-        )
-
-        config: dict | None = None
-        if (workdir / "config.json").exists():
-            config = json.loads((workdir / "config.json").read_text())
-            applied = derive_alignments(config, layout_text)
-            evaluation = evaluate(config, pdfs)
-            if applied:
-                trace.log(
-                    f"round {round_number} auto-derived alignments",
-                    ", ".join(applied),
-                )
+        if engine == "py":
+            outcome = run_script(workdir, f"round_{round_number}")
             trace.log(
-                f"round {round_number} engine evaluation",
-                json.dumps(evaluation, indent=2, default=str)[:6000],
+                f"round {round_number} script output",
+                f"exit {outcome['returncode']} in {outcome['elapsed']:.1f}s\n"
+                f"{outcome['stdout'][-4000:]}\n--- stderr ---\n{outcome['stderr'][-2000:]}",
             )
+            config = None
+            if outcome["returncode"] == 0 and "def parse(" in code:
+                evaluation = py_gate(workdir, round_number, trace)
+                if evaluation.get("clean", 0) > 0:
+                    config = {"key": evaluation.get("key"), "code": code}
+            else:
+                evaluation = None
         else:
-            evaluation = None
+            (workdir / "config.json").unlink(missing_ok=True)
+            outcome = run_script(workdir, f"round_{round_number}")
+            trace.log(
+                f"round {round_number} script output",
+                f"exit {outcome['returncode']} in {outcome['elapsed']:.1f}s\n"
+                f"{outcome['stdout'][-4000:]}\n--- stderr ---\n{outcome['stderr'][-2000:]}",
+            )
+
+            config: dict | None = None
+            if (workdir / "config.json").exists():
+                config = json.loads((workdir / "config.json").read_text())
+                applied = derive_alignments(config, layout_text)
+                try:
+                    evaluation = evaluate(config, pdfs)
+                except BaseException as panic:  # noqa: BLE001 - pyo3 PanicException
+                    # Engine panics derive BaseException, not Exception —
+                    # contain them here so a pathological draft becomes round
+                    # feedback instead of killing the run.
+                    evaluation = {
+                        "stage": "parse",
+                        "results": [
+                            {
+                                "pdf": pdfs[0].name,
+                                "ok": False,
+                                "error": f"ENGINE PANIC: {panic}",
+                                "rows": 0,
+                                "first_error": f"{panic}"[:200],
+                            }
+                        ],
+                        "clean": 0,
+                        "verified": False,
+                    }
+                if applied:
+                    trace.log(
+                        f"round {round_number} auto-derived alignments",
+                        ", ".join(applied),
+                    )
+                trace.log(
+                    f"round {round_number} engine evaluation",
+                    json.dumps(evaluation, indent=2, default=str)[:6000],
+                )
+            else:
+                evaluation = None
 
         elapsed = time.perf_counter() - started
         if evaluation is not None and evaluation.get("verified"):
@@ -850,7 +1168,7 @@ def draft_by_repl(
                 else f"rejected at validation: {evaluation['error'][:90]}"
             )
         else:
-            summary = "no config distilled"
+            summary = "no parse() exercised" if engine == "py" else "no config distilled"
 
         print(f"round {round_number}: {summary} ({elapsed:.1f}s)")
         history.append({"round": round_number, "outcome": summary})
@@ -872,13 +1190,27 @@ def draft_by_repl(
         parts = []
         if "reconcile: FAIL" in outcome["stdout"]:
             parts.append(
+                "YOUR OWN reconcile printed FAIL — the drift names what is "
+                "wrong (a stop term cutting the table early, a dropped row, "
+                "a wrong sign, a mis-binned column). Fix parse() until it "
+                "prints OK."
+                if engine == "py" else
                 "YOUR OWN reconcile FAILED and you called build_config anyway "
                 "— forbidden. The reconcile drift tells you what is wrong: "
                 "a stop term cutting the table early (too few rows), a "
                 "dropped column, or a wrong sign. Fix the region/roles and "
                 "make reconcile print OK BEFORE building the config."
             )
-        if evaluation is not None:
+        if engine == "py":
+            if evaluation is not None:
+                parts.append(py_feedback(evaluation))
+            elif "def parse(" not in code:
+                parts.append(
+                    "The script never defines def parse(frames) — the "
+                    "deliverable is the parser module: KEY, parse(), demo "
+                    "under if __name__ == '__main__'."
+                )
+        elif evaluation is not None:
             engine_feedback = build_feedback(evaluation, pdfs, config)
             engine_feedback = engine_feedback.replace(
                 "return the full corrected config",
@@ -904,14 +1236,16 @@ def draft_by_repl(
                 "parroted its previous script)"
             )
             messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
                     "content": (
                         "Your previous script failed. The diagnosis:\n"
                         f"{feedback[-3000:]}\n\nRewrite the complete script "
                         "fixing exactly what the diagnosis names. Probes "
-                        "first, emu.build_config last."
+                        "first, "
+                        + ("KEY + def parse last." if engine == "py"
+                           else "emu.build_config last.")
                     ),
                 },
             ]
@@ -942,12 +1276,29 @@ def main() -> int:
         help="run this probe script instead of asking the model (canned test)",
     )
     cli.add_argument("--no-save", action="store_true", help="never write the registry")
+    cli.add_argument(
+        "--lean",
+        action="store_true",
+        help="pandas/numpy exploration mode: frames as a DataFrame via "
+        "lean_emulator (le), free-form wrangling, same engine gate",
+    )
+    cli.add_argument(
+        "--py",
+        action="store_true",
+        help="pyledger engine: the artifact is a Python parser module "
+        "(KEY + def parse(frames)), verified by reconciliation on every "
+        "statement",
+    )
     args = cli.parse_args()
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     workdir = Path("logs") / f"distill_{stamp}_{args.pdfs[0].stem[:30]}"
     workdir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(Path(__file__).parent / "distill_emulator.py", workdir / "distill_emulator.py")
+    if args.py:
+        shutil.copy(Path(__file__).parent / "pyledger.py", workdir / "pyledger.py")
+    else:
+        shutil.copy(Path(__file__).parent / "distill_emulator.py", workdir / "distill_emulator.py")
+        shutil.copy(Path(__file__).parent / "lean_emulator.py", workdir / "lean_emulator.py")
     trace = Trace(workdir)
 
     mode = f"canned script {args.script}" if args.script else f"{MODEL} at {BASE_URL}"
@@ -955,16 +1306,53 @@ def main() -> int:
     print(f"workdir: {workdir}")
     trace.log("run start", f"mode={mode}\npdfs={[str(p) for p in args.pdfs]}")
 
+    if args.py:
+        system, template = PY_SYSTEM_PROMPT + "\n\n" + PY_CONTRACT, PY_TASK_TEMPLATE
+    elif args.lean:
+        system, template = LEAN_SYSTEM_PROMPT, LEAN_TASK_TEMPLATE
+    else:
+        system, template = SYSTEM_PROMPT, TASK_TEMPLATE
+
     config, verified, history = draft_by_repl(
         args.pdfs, workdir, args.rounds, trace, canned_script=args.script,
+        system_prompt=system, task_template=template,
+        engine="py" if args.py else "config",
     )
     if config is None or not verified:
-        trace.log("result", f"FAILED ({'no config' if config is None else 'not verified'})")
+        trace.log("result", f"FAILED ({'no artifact' if config is None else 'not verified'})")
         trace.log("round history", json.dumps(history, indent=2))
         trace.close()
         print("\nFAILED: no verified configuration.")
         print(json.dumps(history, indent=2))
         return 1
+
+    if args.py:
+        key = config["key"]
+        trace.log("verified parser", config["code"])
+        if args.no_save:
+            print(f"\nVERIFIED (not saved, --no-save); parser drafted in {workdir}")
+        else:
+            pyregistry = Path(__file__).parent / "pyregistry"
+            pyregistry.mkdir(exist_ok=True)
+            out_path = pyregistry / f"{key}.py"
+            out_path.write_text(config["code"])
+            print(f"\nVERIFIED parser saved: {out_path}")
+            print("Reuse with zero LLM:")
+            print(f"  uv run python pyledger.py statement.pdf --key {key}")
+            trace.log("result", f"VERIFIED parser saved: {out_path}")
+        import pyledger
+
+        for pdf in args.pdfs:
+            statement = pyledger.parse(str(pdf), key=key)
+            line = (
+                f"  {pdf.name}: {len(statement['transactions'])} transactions, "
+                f"opening {statement['opening_balance']:,.2f} -> "
+                f"closing {statement['closing_balance']:,.2f}"
+            )
+            print(line)
+            trace.line(line)
+        trace.close()
+        return 0
 
     trace.log("verified config", json.dumps(config, indent=2))
     if args.no_save:

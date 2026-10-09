@@ -120,6 +120,8 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "bankstatementparser", extra = ["hybrid", "hybrid-vision"] },
+    { name = "numpy" },
+    { name = "pandas" },
     { name = "transtractor" },
 ]
 
@@ -131,6 +133,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "bankstatementparser", extras = ["hybrid", "hybrid-vision"] },
+    { name = "numpy", specifier = ">=2.5.3" },
+    { name = "pandas", specifier = ">=2.3.3" },
     { name = "transtractor", directory = "transtractor" },
 ]
 

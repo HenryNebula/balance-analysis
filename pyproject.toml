@@ -9,6 +9,8 @@ dependencies = [
     "transtractor",
     # Engine B: deterministic ISO-20022/OFX/CSV parsers + LLM/vision PDF path
     "bankstatementparser[hybrid,hybrid-vision]",
+    "pandas>=2.3.3",
+    "numpy>=2.5.3",
 ]
 
 [tool.uv.sources]
