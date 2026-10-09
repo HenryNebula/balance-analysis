@@ -65,10 +65,6 @@ SCRIPT_TIMEOUT = 60  # wall clock per probe script, seconds
 OUTPUT_TAIL = 12000  # chars of script stdout/stderr fed back to the model
 # (real statements are long; the model debugs through this window)
 MAX_TOKENS = 10000  # probe scripts are longer than config JSON
-# Consecutive burner probes before a full script is required (the commit
-# latch at 90% of turns remains the hard deadline). Capable models probing
-# real statements need room; env TRANSTRACTOR_LLM_PROBE_LIMIT overrides.
-PROBE_LIMIT = int(os.environ.get("TRANSTRACTOR_LLM_PROBE_LIMIT", "8"))
 
 EMU_API = """Working environment (your script runs with the statement frames
 already on disk; import and go):
@@ -189,9 +185,10 @@ CONTRACT = f"""Contract for every response:
   generic guesses like "Transactions" or "End of Statement".
 - BURNER PROBES: to just LOOK at something before committing, return a short
   script whose first line is exactly "# probe" (print anything; NO
-  emu.build_config call). Probes are discarded — nothing persists. At most
-  {PROBE_LIMIT} in a row, then the complete full script is required. The
-  converging answer is always ONE full script; probes only help you see.
+  emu.build_config call). Probes are discarded — nothing persists, and there
+  is no cap on them — but they cannot converge the run. The converging
+  answer is always ONE full script; from 90% of turns used onward you will
+  be warned on every probe that only a full script can finish.
 - MANDATORY LOOKING: the harness does NOT accept your first full script
   until burner probes have shown the TOP of the statement AND its END (the
   words that terminate the table are at the end — read them, never guess).
@@ -622,7 +619,6 @@ def draft_by_repl(
     rounds: int,
     trace: Trace,
     canned_script: Path | None = None,
-    probes_limit: int = PROBE_LIMIT,
 ) -> tuple[dict | None, bool, list[dict]]:
     """Returns (best config or None, verified?, round history)."""
     frames, layout_text = frames_for(pdfs, workdir)
@@ -762,38 +758,6 @@ def draft_by_repl(
             messages.append({"role": "user", "content": feedback})
             history.append({"round": round_number, "outcome": "probe+config rejected"})
             continue
-        if is_probe and not commit_mode and consecutive_probes >= probes_limit:
-            feedback = (
-                f"PROBE BUDGET SPENT — {probes_limit} burner probes in a row. "
-                "Probes are CLOSED until you submit a full script. Return the "
-                "COMPLETE full script now (keep needed prints inside it, "
-                "verify with emu.reconcile, emu.build_config last); probes "
-                "reopen after a full-script turn."
-            )
-            trace.log(
-                f"round {round_number} probe rejected (consecutive cap)",
-                code[:500],
-            )
-            print(f"round {round_number}: probe rejected (consecutive cap)")
-            messages.append({"role": "user", "content": feedback})
-            history.append(
-                {"round": round_number, "outcome": "probe rejected (consecutive cap)"}
-            )
-            continue
-        if is_probe and commit_mode:
-            feedback = (
-                "COMMIT MODE — 90% of the turns are used and probes are "
-                "CLOSED. Return the COMPLETE full script now: keep any "
-                "needed prints inside it, verify with emu.reconcile, and "
-                "finish with emu.build_config."
-            )
-            trace.log(f"round {round_number} probe rejected (commit mode)", code[:500])
-            print(f"round {round_number}: probe rejected (commit mode)")
-            messages.append({"role": "user", "content": feedback})
-            history.append(
-                {"round": round_number, "outcome": "probe rejected (commit mode)"}
-            )
-            continue
         if is_probe:
             consecutive_probes += 1
             probes_done += 1
@@ -812,20 +776,20 @@ def draft_by_repl(
                 f"exit {outcome['returncode']}\n{outcome['stdout'][-4000:]}"
                 f"\n--- stderr ---\n{outcome['stderr'][-2000:]}",
             )
-            deadline = consecutive_probes >= probes_limit
             verdict = "probe ok" if outcome["returncode"] == 0 else "probe crashed"
-            print(f"round {round_number}: {verdict} (burner, {consecutive_probes}/{PROBE_LIMIT})")
+            print(f"round {round_number}: {verdict} (burner, #{consecutive_probes})")
             history.append({"round": round_number, "outcome": f"{verdict} (burner)"})
             parts = [script_feedback(outcome)]
+            warning = (
+                "WARNING: 90% of the turns are used — probes cannot converge "
+                "the run. Return the COMPLETE full script next (keep needed "
+                "prints inside it, verify with emu.reconcile, "
+                "emu.build_config last)."
+                if commit_mode
+                else "Probe again, or return the complete full script."
+            )
             parts.append(
-                "End of probe (discarded — nothing was distilled). "
-                + (
-                    "You have used your consecutive probe budget: return the "
-                    "COMPLETE full script now (probes first if needed inside "
-                    "it, emu.build_config last)."
-                    if deadline
-                    else "Probe again, or return the complete full script."
-                )
+                "End of probe (discarded — nothing was distilled). " + warning
             )
             feedback = "\n\n".join(parts)
             trace.log(f"round {round_number} probe feedback sent", feedback)
@@ -959,13 +923,6 @@ def main() -> int:
         default=None,
         help="run this probe script instead of asking the model (canned test)",
     )
-    cli.add_argument(
-        "--probes",
-        type=int,
-        default=PROBE_LIMIT,
-        help=f"consecutive burner probes allowed before a full script "
-        f"is required (default {PROBE_LIMIT})",
-    )
     cli.add_argument("--no-save", action="store_true", help="never write the registry")
     args = cli.parse_args()
 
@@ -982,7 +939,6 @@ def main() -> int:
 
     config, verified, history = draft_by_repl(
         args.pdfs, workdir, args.rounds, trace, canned_script=args.script,
-        probes_limit=args.probes,
     )
     if config is None or not verified:
         trace.log("result", f"FAILED ({'no config' if config is None else 'not verified'})")
