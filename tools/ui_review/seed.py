@@ -2,7 +2,8 @@
 the repo root): three accounts with parsed/failed statements plus two
 distill runs (one converged with auto-parse, one failed with live probe
 selections for the overlay). Writes data/review-manifest.json for the tour
-script. Idempotent: wipes data/accounts + data/runs first.
+script. run_tour.sh wipes state BEFORE the server starts; this script
+never deletes anything (it once ate a live account mid-demo).
 
     uv run --group web python tools/ui_review/seed.py
 """
@@ -58,10 +59,6 @@ def wait_terminal(client, run_id, timeout=120):
 
 def main() -> None:
     data_root = REPO / "data"
-    import shutil
-
-    for name in ("accounts", "runs"):
-        shutil.rmtree(data_root / name, ignore_errors=True)
 
     # A canned PROBE script for the failed run (its selections paint the
     # overlay); the registry module itself converges the other run.
