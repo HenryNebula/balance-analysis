@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}{{ meta.id }} · {{ account.display_name }} · statementledger{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="mono">{{ meta.id }}</h1>
+    <div class="page-sub">
+      <a href="/accounts/{{ account.slug }}">{{ account.display_name }}</a>
+      {% if meta.period %} · {{ meta.period|period }}{% endif %}
+      · uploaded {{ meta.uploaded_at|dt }} · {{ (meta.size_bytes / 1024)|round(0)|int }} KB
+    </div>
+  </div>
+</div>
+
+{% if ledger and verified %}
+<div class="banner banner-ok">
+  <strong>✓ RECONCILED</strong> — verified by the arithmetic gate at parse time
+  · opening {{ ledger.opening_balance|money }} → closing {{ ledger.closing_balance|money }}
+  {% if ledger.totals %} · totals ✓ ({{ ledger.totals|length }}/{{ ledger.totals|length }}){% endif %}
+</div>
+{% elif ledger %}
+<div class="banner banner-fail"><strong>✗ Does not reconcile</strong> — the stored ledger fails the arithmetic gate (parser or statement changed since parsing). Re-parse.</div>
+{% elif meta.status == 'failed' %}
+<div class="banner banner-fail"><strong>✗ No parser verified this statement.</strong>
+  {% set last = meta.history[-1] if meta.history else None %}
+  {% if last and last.note %}{{ last.note }}{% endif %}
+  See the account page for per-parser attempts and the harness command.</div>
+{% else %}
+<div class="banner">◻ Unparsed.</div>
+{% endif %}
+
+<div class="toolbar">
+  {% if ledger %}
+  <span class="text-muted">parser <code>{{ ledger._key }}</code></span>
+  {% endif %}
+  <a class="btn" href="{{ pdf_rel }}">open original.pdf</a>
+  <form method="post" action="/accounts/{{ account.slug }}/statements/{{ meta.id }}/parse" class="inline-form">
+    <input type="hidden" name="back_to" value="/accounts/{{ account.slug }}/statements/{{ meta.id }}">
+    <button class="btn" type="submit">re-parse</button>
+  </form>
+  <button class="btn btn-danger" hx-delete="/accounts/{{ account.slug }}/statements/{{ meta.id }}"
+          hx-confirm="Delete this statement?"
+          hx-on::after-request="window.location='/accounts/{{ account.slug }}'">delete</button>
+</div>
+
+{% if ledger %}
+<table class="table table-ledger">
+  <thead>
+    <tr><th>Date</th><th>Description</th><th class="num">Amount</th><th class="num">Balance</th></tr>
+  </thead>
+  <tbody>
+    {% for txn in ledger.transactions %}
+    <tr>
+      <td class="mono">{{ txn.date or '—' }}</td>
+      <td>{{ txn.description }}</td>
+      <td class="num">{{ txn.amount|signed }}</td>
+      <td class="num">{{ txn.balance|money }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% if ledger.totals %}
+<table class="table table-tight">
+  <thead><tr><th>Printed total</th><th>Kind</th><th class="num">Value</th></tr></thead>
+  <tbody>{% for t in ledger.totals %}
+    <tr><td>{{ t.label }}</td><td>{{ t.kind }}</td><td class="num">{{ t.value|money }}</td></tr>
+  {% endfor %}</tbody>
+</table>
+{% endif %}
+{% endif %}
+
+<h2>Parse history</h2>
+<table class="table table-tight">
+  <thead><tr><th>When</th><th>Outcome</th><th>Detail</th></tr></thead>
+  <tbody>
+    {% for entry in meta.history %}
+    <tr>
+      <td>{{ entry.at|dt }}</td>
+      <td>{% if entry.outcome == 'parsed' %}<span class="chip chip-ok">parsed</span>
+          {% else %}<span class="chip chip-fail">failed</span>{% endif %}</td>
+      <td>
+        {% if entry.outcome == 'parsed' %}
+          {{ entry.key }} · statementledger {{ entry.statementledger }}
+        {% else %}
+          {% if entry.note %}{{ entry.note }}{% endif %}
+          {% if entry.attempts %}
+          <details><summary>{{ entry.attempts|length }} attempt{{ '' if entry.attempts|length == 1 else 's' }}</summary>
+            <ul>{% for a in entry.attempts %}<li><code>{{ a.key }}</code>: {{ a.error }}</li>{% endfor %}</ul>
+          </details>
+          {% endif %}
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3" class="empty">Never parsed.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

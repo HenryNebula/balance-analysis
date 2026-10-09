@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Accounts · statementledger{% endblock %}
+{% block content %}
+<h1>Accounts</h1>
+
+{% if error %}<div class="banner banner-error">{{ error }}</div>{% endif %}
+
+{% if accounts %}
+<div class="cards">
+  {% for row in accounts %}
+  <div class="card">
+    <div class="card-head">
+      <a class="card-title" href="/accounts/{{ row.account.slug }}">{{ row.account.display_name }}</a>
+      {% if row.account.registry_key %}
+        <span class="chip chip-key" title="pinned parser">◇ {{ row.account.registry_key }}</span>
+      {% else %}
+        <span class="chip chip-muted" title="try every registered parser on upload">◇ detection</span>
+      {% endif %}
+    </div>
+    <div class="card-body">
+      {{ row.metas|length }} statement{{ '' if row.metas|length == 1 else 's' }}{% if row.metas %}
+        · {{ row.metas|length - row.parsed - row.failed }} unparsed
+        · {{ row.parsed }} parsed{% if row.failed %} · <span class="text-warn">{{ row.failed }} need attention</span>{% endif %}
+        · updated {{ row.updated|dt }}{% endif %}
+      {% if row.latest %}
+      <div class="card-meta">latest closing {{ row.latest.summary.closing_balance|money }}
+        {% if row.latest.period %} · {{ row.latest.period|period }}{% endif %}</div>
+      {% endif %}
+    </div>
+    <div class="card-foot"><a class="btn" href="/accounts/{{ row.account.slug }}">Open</a></div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="empty">No accounts yet — create one below, then upload a statement PDF.</p>
+{% endif %}
+
+<div class="card card-form">
+  <h2>New account</h2>
+  <form method="post" action="/accounts" class="form-row">
+    <label>Display name
+      <input type="text" name="display_name" required placeholder="Blue Lantern Savings">
+    </label>
+    <label>Parser <span class="text-muted">(optional — leave unset to auto-detect)</span>
+      <select name="registry_key">
+        <option value="">auto-detect</option>
+        {% for key in keys %}<option value="{{ key }}">{{ key }}</option>{% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="btn btn-primary">Create account</button>
+  </form>
+</div>
+{% endblock %}

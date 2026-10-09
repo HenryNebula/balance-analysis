@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Registry · statementledger{% endblock %}
+{% block content %}
+<h1>Parser registry</h1>
+<p class="page-sub">Same bank → same parser, zero LLM. Parsers are code shared by all
+accounts; a parser saved by the distill harness appears here (and in every key
+picker) without a server restart.</p>
+<table class="table">
+  <thead><tr><th>Key</th><th>Description</th><th class="num">Accounts pinned</th><th class="num">Statements parsed</th></tr></thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td class="mono">{{ row.key }}</td>
+      <td>{% if row.description %}{{ row.description }}{% else %}<span class="text-muted">no description</span>{% endif %}</td>
+      <td class="num">{{ row.accounts }}</td>
+      <td class="num">{{ row.statements }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="empty">No parsers registered.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

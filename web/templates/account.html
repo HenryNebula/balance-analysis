@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ account.display_name }} · statementledger{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ account.display_name }}</h1>
+    <div class="page-sub">
+      {% if ledger %}account {{ ledger.account_number|mask }} · {% endif %}
+      {{ metas|length }} statement{{ '' if metas|length == 1 else 's' }}
+      {% if account.registry_key_source %} · pin source: {{ account.registry_key_source }}{% endif %}
+    </div>
+  </div>
+  <details class="pin-details">
+    <summary class="chip chip-key">{% if account.registry_key %}◇ pinned: {{ account.registry_key }}{% else %}◇ unpinned (detection mode){% endif %} — change</summary>
+    <form method="post" action="/accounts/{{ account.slug }}/key" class="form-column card card-form">
+      <label>Parser
+        <select name="registry_key">
+          <option value="">unpinned — auto-detect on upload</option>
+          {% for key in keys %}
+          <option value="{{ key }}" {% if key == account.registry_key %}selected{% endif %}>{{ key }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit" class="btn btn-primary">Save pin</button>
+    </form>
+  </details>
+</div>
+
+{% if error %}<div class="banner banner-error">{{ error }}</div>{% endif %}
+
+<form class="upload-zone"
+      hx-post="/accounts/{{ account.slug }}/statements"
+      hx-encoding="multipart/form-data"
+      hx-target="#statements-region" hx-swap="outerHTML">
+  <input type="file" name="file" accept=".pdf,application/pdf" required>
+  <button type="submit" class="btn btn-primary">Upload statement PDF</button>
+  <span class="text-muted">PDF only · ≤ 25 MB · duplicates are detected by content</span>
+</form>
+
+{% include "statements_region.html" %}
+
+<div class="row-end">
+  <button class="btn btn-danger" hx-delete="/accounts/{{ account.slug }}" hx-confirm="Delete {{ account.display_name }} and every stored statement in it?">Delete account</button>
+</div>
+{% endblock %}

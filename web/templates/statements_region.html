@@ -1,0 +1,40 @@
+{# The statements table + the latest upload/parse outcome. Rendered inside
+   account.html, and swapped wholesale by upload/re-parse responses (hx-target
+   #statements-region). #}
+<div id="statements-region">
+  {% if outcome %}{% include "outcome.html" %}{% endif %}
+
+  <table class="table">
+    <thead>
+      <tr><th>Period</th><th>Txns</th><th>Opening → Closing</th><th>Status</th><th class="th-actions">Actions</th></tr>
+    </thead>
+    <tbody>
+      {% for m in metas %}
+      <tr>
+        <td>{{ m.period|period }}</td>
+        <td class="num">{{ m.summary.transactions if m.summary else '—' }}</td>
+        <td class="num">
+          {% if m.summary %}{{ m.summary.opening_balance|money }} → {{ m.summary.closing_balance|money }}{% else %}—{% endif %}
+        </td>
+        <td>
+          {% if m.status == 'parsed' %}<span class="chip chip-ok">✓ parsed</span>
+          {% elif m.status == 'failed' %}<span class="chip chip-fail">✗ no parser verified</span>
+          {% else %}<span class="chip chip-muted">◻ unparsed</span>{% endif %}
+        </td>
+        <td class="td-actions">
+          <a class="btn btn-small" href="/accounts/{{ account.slug }}/statements/{{ m.id }}">view</a>
+          <button class="btn btn-small" title="re-parse with the account pin"
+                  hx-post="/accounts/{{ account.slug }}/statements/{{ m.id }}/parse"
+                  hx-target="#statements-region" hx-swap="outerHTML">reparse</button>
+          <button class="btn btn-small btn-danger" title="delete statement"
+                  hx-delete="/accounts/{{ account.slug }}/statements/{{ m.id }}"
+                  hx-confirm="Delete this statement ({{ m.original_filename }})?"
+                  hx-target="closest tr" hx-swap="delete">✕</button>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="empty">No statements uploaded yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

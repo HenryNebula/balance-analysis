@@ -17,9 +17,19 @@ statementledger = "statementledger.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/statementledger"]
 
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [dependency-groups]
 dev = [
+    "httpx>=0.27",
     "pikepdf>=10.16.0",
     "pytest>=8",
     "reportlab>=4",
+]
+web = [
+    "fastapi>=0.115",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "uvicorn>=0.30",
 ]

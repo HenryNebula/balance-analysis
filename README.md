@@ -72,11 +72,29 @@ any OpenAI-compatible endpoint works, including a local llama-server.
 Probes run in a sandboxed child (no network, rlimits, transcription lint),
 so the model can look but not smuggle statement data into code.
 
+## Web UI (local)
+
+`web/` is a single-user web UI over the library: accounts as folders,
+drag-in PDF upload, parse with the registry, and hard verification failures
+shown as first-class outcomes (per-parser attempts, not stack traces). No
+database — the filesystem under `data/` is the store. Design:
+[docs/web-ui-design.md](docs/web-ui-design.md).
+
+```console
+$ uv sync --group web
+$ uv run --group web uvicorn web.app:app --host 127.0.0.1 --port 8765
+```
+
+The web stack (FastAPI + Jinja2 + htmx, vendored) lives in a separate
+dependency group; the wheel still ships only `statementledger`. **No auth,
+localhost only** — statements are sensitive financial data. Do not
+port-forward or run on a shared host.
+
 ## Development
 
 ```console
-$ uv sync
-$ uv run pytest                                     # 47 tests
+$ uv sync --group web
+$ uv run --group web pytest                         # 69 tests
 $ uv run python tools/fixtures/gen_fixtures.py      # regenerate fixtures
 $ uv build                                          # wheel: package + registry only
 ```

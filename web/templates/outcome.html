@@ -1,0 +1,58 @@
+{# Upload / re-parse outcome card (docs/web-ui-design.md §6.3) #}
+{% if outcome.kind == 'parsed' %}
+<div class="banner banner-ok">
+  <strong>✓ Parsed</strong>
+  {% if outcome.statement.period %}· {{ outcome.statement.period|period }}{% endif %}
+  · {{ outcome.statement.summary.transactions }} transactions
+  · reconciled (opening {{ outcome.statement.summary.opening_balance|money }} → closing {{ outcome.statement.summary.closing_balance|money }})
+  · parser <code>{{ outcome.key }}</code>
+  <a class="btn btn-small" href="/accounts/{{ account.slug }}/statements/{{ outcome.statement.id }}">view</a>
+  {% if outcome.suggest_pin %}
+  <div class="banner-action">
+    Exactly one parser verified this statement. Pin the account to it so future
+    uploads skip detection?
+    <form method="post" action="/accounts/{{ account.slug }}/key" class="inline-form">
+      <input type="hidden" name="registry_key" value="{{ outcome.suggest_pin }}">
+      <button type="submit" class="btn btn-small btn-primary">Pin to {{ outcome.suggest_pin }}</button>
+    </form>
+  </div>
+  {% elif outcome.ambiguous %}
+  <div class="banner-action text-warn">
+    {{ outcome.ambiguous|length }} parsers verified this statement ({{ outcome.ambiguous|join(', ') }}).
+    Parsed with the first; the account stays unpinned — pick a parser under “change” above.
+  </div>
+  {% endif %}
+</div>
+
+{% elif outcome.kind == 'failed' %}
+<div class="banner banner-fail">
+  <strong>✗ {% if outcome.pinned %}The pinned parser did not verify this statement{% else %}No registered parser verified {{ outcome.statement.original_filename }}{% endif %}</strong>
+  {% if outcome.note %}<div>{{ outcome.note }}</div>{% endif %}
+  {% if outcome.attempts %}
+  <table class="table table-tight">
+    <thead><tr><th>Parser</th><th>Why it failed the gate</th></tr></thead>
+    <tbody>
+      {% for a in outcome.attempts %}
+      <tr><td class="mono">{{ a.key }}</td><td>{{ a.error }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  <div class="text-muted">The PDF is stored; nothing was parsed.</div>
+  <div class="cli">
+    <div>Register a new parser with the distill harness (needs STATEMENTLEDGER_LLM_* in .env — see .env.example):</div>
+    <pre>$ uv run python tools/distill_harness.py {{ outcome.pdf_rel }} --max-probes 8</pre>
+  </div>
+</div>
+
+{% elif outcome.kind == 'duplicate' %}
+<div class="banner banner-warn">
+  <strong>⚠ Already uploaded</strong>
+  — same file (sha256) as {{ outcome.statement.original_filename }}
+  ({{ outcome.statement.uploaded_at|dt }}{% if outcome.statement.status == 'parsed' %}, parsed{% elif outcome.statement.status == 'failed' %}, parse failed{% else %}, unparsed{% endif %}).
+  <a class="btn btn-small" href="/accounts/{{ account.slug }}/statements/{{ outcome.statement.id }}">view existing</a>
+</div>
+
+{% elif outcome.kind == 'error' %}
+<div class="banner banner-error"><strong>Upload rejected</strong> — {{ outcome.message }}</div>
+{% endif %}

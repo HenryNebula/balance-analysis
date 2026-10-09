@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}statementledger{% endblock %}</title>
+  {# 4xx fragments must swap: a stored-but-unparseable upload is an outcome,
+     not a transport error (docs/web-ui-design.md §4). htmx default drops them. #}
+  <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"233","swap":false},{"code":"2xx","swap":true},{"code":"3xx","swap":false},{"code":"4xx","swap":true,"error":true},{"code":"5xx","swap":false,"error":true},{"code":"other","swap":false,"error":true}]}'>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">statementledger</a>
+    <nav>
+      <a href="/registry">registry: {{ registry_count() }} parsers</a>
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="foot">local · no auth · do not port-forward — statements are sensitive financial data</footer>
+</body>
+</html>
