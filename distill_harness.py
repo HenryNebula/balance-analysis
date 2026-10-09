@@ -65,7 +65,10 @@ SCRIPT_TIMEOUT = 60  # wall clock per probe script, seconds
 OUTPUT_TAIL = 12000  # chars of script stdout/stderr fed back to the model
 # (real statements are long; the model debugs through this window)
 MAX_TOKENS = 10000  # probe scripts are longer than config JSON
-PROBE_LIMIT = 3  # consecutive burner probes before a full script is required
+# Consecutive burner probes before a full script is required (the commit
+# latch at 90% of turns remains the hard deadline). Capable models probing
+# real statements need room; env TRANSTRACTOR_LLM_PROBE_LIMIT overrides.
+PROBE_LIMIT = int(os.environ.get("TRANSTRACTOR_LLM_PROBE_LIMIT", "8"))
 
 EMU_API = """Working environment (your script runs with the statement frames
 already on disk; import and go):
@@ -619,6 +622,7 @@ def draft_by_repl(
     rounds: int,
     trace: Trace,
     canned_script: Path | None = None,
+    probes_limit: int = PROBE_LIMIT,
 ) -> tuple[dict | None, bool, list[dict]]:
     """Returns (best config or None, verified?, round history)."""
     frames, layout_text = frames_for(pdfs, workdir)
@@ -758,9 +762,9 @@ def draft_by_repl(
             messages.append({"role": "user", "content": feedback})
             history.append({"round": round_number, "outcome": "probe+config rejected"})
             continue
-        if is_probe and not commit_mode and consecutive_probes >= PROBE_LIMIT:
+        if is_probe and not commit_mode and consecutive_probes >= probes_limit:
             feedback = (
-                f"PROBE BUDGET SPENT — {PROBE_LIMIT} burner probes in a row. "
+                f"PROBE BUDGET SPENT — {probes_limit} burner probes in a row. "
                 "Probes are CLOSED until you submit a full script. Return the "
                 "COMPLETE full script now (keep needed prints inside it, "
                 "verify with emu.reconcile, emu.build_config last); probes "
@@ -808,7 +812,7 @@ def draft_by_repl(
                 f"exit {outcome['returncode']}\n{outcome['stdout'][-4000:]}"
                 f"\n--- stderr ---\n{outcome['stderr'][-2000:]}",
             )
-            deadline = consecutive_probes >= PROBE_LIMIT
+            deadline = consecutive_probes >= probes_limit
             verdict = "probe ok" if outcome["returncode"] == 0 else "probe crashed"
             print(f"round {round_number}: {verdict} (burner, {consecutive_probes}/{PROBE_LIMIT})")
             history.append({"round": round_number, "outcome": f"{verdict} (burner)"})
@@ -955,6 +959,13 @@ def main() -> int:
         default=None,
         help="run this probe script instead of asking the model (canned test)",
     )
+    cli.add_argument(
+        "--probes",
+        type=int,
+        default=PROBE_LIMIT,
+        help=f"consecutive burner probes allowed before a full script "
+        f"is required (default {PROBE_LIMIT})",
+    )
     cli.add_argument("--no-save", action="store_true", help="never write the registry")
     args = cli.parse_args()
 
@@ -970,7 +981,8 @@ def main() -> int:
     trace.log("run start", f"mode={mode}\npdfs={[str(p) for p in args.pdfs]}")
 
     config, verified, history = draft_by_repl(
-        args.pdfs, workdir, args.rounds, trace, canned_script=args.script
+        args.pdfs, workdir, args.rounds, trace, canned_script=args.script,
+        probes_limit=args.probes,
     )
     if config is None or not verified:
         trace.log("result", f"FAILED ({'no config' if config is None else 'not verified'})")
