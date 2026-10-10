@@ -79,6 +79,8 @@ The tool schemas are attached to every request. Doctrine:
 - python runs ad-hoc code in a sandbox (import statementledger as pl;
   pl.load_frames() reads the statements) — use it when the typed tools
   don't cover the question.
+- read shows parser.py with line numbers — the source of truth after
+  edits, or after old turns were elided from this conversation.
 - write creates/replaces parser.py (returns the lint verdict); edit fixes
   one spot (the anchor must be unique). Never re-emitting the whole file
   to fix one line is the point of edit.

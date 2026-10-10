@@ -97,11 +97,21 @@ def test_edit_requires_unique_anchor(tmp_path):
     agent._tool_write(ctx, {"content": "a = 1\nb = 2\na = 1\n"})
     missing = agent._tool_edit(ctx, {"old": "zzz", "new": "q"})
     assert missing.startswith("ERROR: old text not found")
+    assert "call read" in missing
     ambiguous = agent._tool_edit(ctx, {"old": "a = 1", "new": "q"})
     assert "matches 2 places" in ambiguous
     ok = agent._tool_edit(ctx, {"old": "b = 2", "new": "b = 3"})
     assert ok.startswith("replaced 1 occurrence")
     assert (tmp_path / "parser.py").read_text() == "a = 1\nb = 3\na = 1\n"
+
+
+def test_read_returns_numbered_parser_or_error(tmp_path):
+    ctx = make_ctx(tmp_path)
+    assert agent._tool_read(ctx).startswith("ERROR: parser.py does not exist")
+    agent._tool_write(ctx, {"content": "KEY = 'us__x__y__1'\n"})
+    numbered = agent._tool_read(ctx)
+    assert numbered.startswith("001 KEY = 'us__x__y__1'")
+    assert "002" not in numbered  # single line: no phantom numbering
 
 
 def test_run_missing_parser(tmp_path):

@@ -568,6 +568,9 @@ TOOLS = [
              "typed tools don't cover.", {
                  "code": {"type": "string"},
              }, ["code"]),
+    _schema("read", "Read parser.py with line numbers — the source of "
+             "truth after edits, or after old turns were elided from the "
+             "conversation.", {}, []),
     _schema("write", "Create or replace parser.py. Returns the lint "
              "verdict; run refuses a violating parser.", {
                  "content": {"type": "string", "description": "the complete parser.py source"},
@@ -698,6 +701,17 @@ def _key_check(code: str, ctx: Ctx) -> str | None:
     return None
 
 
+def _tool_read(ctx: Ctx) -> str:
+    path = ctx.workdir / "parser.py"
+    if not path.exists():
+        return "ERROR: parser.py does not exist yet — use write first"
+    code = path.read_text()
+    numbered = "\n".join(f"{i:03d} {line}"
+                         for i, line in enumerate(code.splitlines(), 1))
+    ctx.trace.log("read parser.py", f"{len(code)} chars")
+    return numbered[:8000] + ("\n(truncated)" if len(numbered) > 8000 else "")
+
+
 def _tool_write(ctx: Ctx, args: dict) -> str:
     content = str(args.get("content", ""))
     if len(content) > 24_000:
@@ -727,8 +741,8 @@ def _tool_edit(ctx: Ctx, args: dict) -> str:
         return "ERROR: old/new over 4000 chars — edit a smaller spot"
     count = code.count(old)
     if count == 0:
-        return ("ERROR: old text not found in parser.py — copy it exactly "
-                f"from the file (read it via python or a failed run's hint)")
+        return ("ERROR: old text not found in parser.py — call read to see "
+                "the file as it is, then retry with text copied exactly")
     if count > 1:
         return (f"ERROR: old text matches {count} places — include "
                 "surrounding lines to make it unique")
@@ -799,6 +813,8 @@ def dispatch(name: str, arguments: str, ctx: Ctx) -> tuple[str, str]:
         return _tool_table(ctx, args), "look"
     if name == "python":
         return _tool_python(ctx, args), "look"
+    if name == "read":
+        return _tool_read(ctx), "look"
     if name == "write":
         return _tool_write(ctx, args), "code"
     if name == "edit":
