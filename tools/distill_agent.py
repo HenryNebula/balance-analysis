@@ -42,7 +42,7 @@ load_env()
 
 import statementledger as pl
 from statementledger.frames import frames_for
-from statementledger.registry import REGISTRY, key_problem
+from statementledger.registry import REGISTRY, key_problem, module_path
 
 # LLM endpoint (STATEMENTLEDGER_LLM_* in .env / environment; see .env.example)
 BASE_URL = os.environ.get("STATEMENTLEDGER_LLM_URL", "").rstrip("/")
@@ -1205,7 +1205,11 @@ def main() -> int:
     baseline = None
     pins = None
     if args.key:
-        source_path = REGISTRY / f"{args.key}.py"
+        # maintain evolves the parser WHEREVER it lives: the user overlay
+        # shadows the built-in (runtime-distilled parsers are user data)
+        source_path = module_path(args.key)
+        if not source_path.exists():
+            source_path = REGISTRY / f"{args.key}.py"
         if not source_path.exists():
             print(f"no registered parser {args.key!r} in {REGISTRY}")
             return 1
@@ -1291,8 +1295,9 @@ def main() -> int:
         trace.close()
         return 0
 
-    REGISTRY.mkdir(exist_ok=True)
-    out_path = REGISTRY / f"{key}.py"
+    out_path = module_path(key)  # the overlay when one is configured (the
+    # web app points it at its data tree), else the package registry
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(artifact["code"])
     print(f"\nVERIFIED parser saved: {out_path}")
     print("Reuse with zero LLM:")

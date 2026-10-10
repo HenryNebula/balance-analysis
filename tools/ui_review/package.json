@@ -1,0 +1,9 @@
+{
+  "name": "statementledger-ui-review",
+  "private": true,
+  "description": "Dev-only screenshot tour for the ui-review-loop skill. Not part of the web UI runtime (which stays npm-free).",
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "^1.64.0"
+  }
+}

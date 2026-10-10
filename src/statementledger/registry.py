@@ -7,11 +7,25 @@ Each registry module lives at statementledger/registry/<key>.py and defines
 
 Modules are loaded by key, checked for the contract, and shipped in the
 wheel — a registered parser parses FUTURE months of the same bank with no
-LLM in the loop. A new bank means one new module (see tools/distill_harness.py).
+LLM in the loop. A new bank means one new module (see tools/distill_agent.py).
+
+Two layers, in precedence order:
+
+1. The USER REGISTRY — an overlay directory (STATEMENTLEDGER_USER_REGISTRY,
+   set by the web app to a data-tree path). Parsers distilled at runtime are
+   USER DATA: they live under the app's data root, never inside the repo,
+   and shadow same-key built-ins so a maintain run can evolve a shipped
+   parser without touching package source.
+2. The BUILT-IN registry (this package's registry/ dir) — the curated set
+   that ships in the wheel.
+
+keys() globs both live on every call, so a parser saved by the distill
+harness becomes usable by a running web server with no restart.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -42,21 +56,47 @@ def key_problem(key: str) -> str | None:
     return None
 
 
+def user_registry() -> Path | None:
+    """The overlay directory (None when STATEMENTLEDGER_USER_REGISTRY is
+    unset) — user-distilled parsers, shadowing the built-in registry."""
+    path = os.environ.get("STATEMENTLEDGER_USER_REGISTRY", "").strip()
+    return Path(path) if path else None
+
+
 def keys() -> list[str]:
-    """All registered parser keys, sorted."""
-    return sorted(path.stem for path in REGISTRY.glob("*.py"))
+    """All registered parser keys, sorted (built-in + user overlay)."""
+    found = {path.stem for path in REGISTRY.glob("*.py")}
+    overlay = user_registry()
+    if overlay is not None:
+        found |= {path.stem for path in overlay.glob("*.py")}
+    return sorted(found)
+
+
+def module_path(key: str) -> Path:
+    """Where a parser with this key lives — or should be SAVED: the overlay
+    when one is configured (runtime-distilled parsers are user data), else
+    the built-in registry (e.g. the distill harness run by hand from the
+    repo root)."""
+    overlay = user_registry()
+    if overlay is not None:
+        return overlay / f"{key}.py"
+    return REGISTRY / f"{key}.py"
 
 
 def load_module(key: str):
-    """Import registry/<key>.py and check it declares KEY + parse()."""
+    """Import the parser module for a key (overlay shadows built-in) and
+    check it declares KEY + parse()."""
     import importlib.util
 
     problem = key_problem(key)
     if problem:
         raise ValueError(problem)
-    path = REGISTRY / f"{key}.py"
+    path = module_path(key)
     if not path.exists():
-        raise FileNotFoundError(f"no registered parser {key!r} in {REGISTRY}")
+        path = REGISTRY / f"{key}.py"  # fall back to the built-in copy
+    if not path.exists():
+        raise FileNotFoundError(
+            f"no registered parser {key!r} (looked in {path} and {REGISTRY})")
     spec = importlib.util.spec_from_file_location(
         f"statementledger_registry_{key}", path)
     module = importlib.util.module_from_spec(spec)

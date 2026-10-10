@@ -64,6 +64,37 @@ def test_unregistered_key_is_an_error():
         sl.load_module("us__nosuch__bank__product__9")
 
 
+def test_user_registry_overlay(tmp_path, monkeypatch):
+    # parsers distilled at runtime are USER DATA: an overlay directory that
+    # keys() unions in, load_module() shadows built-ins with, and
+    # module_path() points saves at — nothing lands in the package source
+    from statementledger import registry
+
+    monkeypatch.setenv("STATEMENTLEDGER_USER_REGISTRY", str(tmp_path))
+    (tmp_path / "us__overlaybank__savings__1.py").write_text(
+        'KEY = "us__overlaybank__savings__1"\n'
+        "def parse(frames):\n    return {}\n")
+    assert "us__overlaybank__savings__1" in sl.keys()
+    assert registry.module_path("us__newbank__savings__1") == (
+        tmp_path / "us__newbank__savings__1.py")
+
+    # a same-key overlay module shadows the built-in (maintain-mode evolution
+    # writes a user copy, the shipped source stays untouched)
+    shadow = tmp_path / "us__bluelantern__savings__1.py"
+    shadow.write_text(
+        'KEY = "us__bluelantern__savings__1"\n'
+        "def parse(frames):\n"
+        "    return {'sentinel': 'overlay'}\n")
+    assert registry.module_path("us__bluelantern__savings__1") == shadow
+    assert sl.load_module("us__bluelantern__savings__1").parse({}) == {
+        "sentinel": "overlay"}
+
+    monkeypatch.delenv("STATEMENTLEDGER_USER_REGISTRY")
+    assert "us__overlaybank__savings__1" not in sl.keys()  # gone when unset
+    assert registry.module_path("us__bluelantern__savings__1") == (
+        registry.REGISTRY / "us__bluelantern__savings__1.py")
+
+
 @pytest.mark.parametrize("pdf,key", CASES)
 def test_public_parse_all_normalizes_single_ledger(pdf, key):
     ledgers = sl.parse_all(str(FIXTURES / pdf), key=key)

@@ -1,6 +1,58 @@
 # statementledger web UI — design
 
-Status: design (no implementation). Date: 2026-10-09.
+Status: implemented (Phases 1–3, 2026-10-09). The phased plan in §11 is
+complete: `web/` + `tests/test_web.py` against the real fixtures; the
+provenance convention of §9.5 is implemented UI-side (degrades gracefully)
+but not yet adopted by any registry module. Date: 2026-10-09.
+
+## UI review log (ui-review-loop, 2026-10-09)
+
+External fresh-eyes reviewer over a fixed screenshot tour (`tools/ui_review/`:
+`run_tour.sh` wipes + reseeds state through the app's own code paths, walks
+15 labeled states with playwright-core + system chromium, `review.sh`
+submits to the headless reviewer). Same tour every round; verdict ladder
+GA: NO → ACCEPTABLE → GA: YES.
+
+| Round | Findings | Verdict |
+|---|---|---|
+| 1 | 41 | GA: NO |
+| 2 | 12 | ACCEPTABLE |
+| 3 | 8 | ACCEPTABLE |
+| 4 | 5 | ACCEPTABLE |
+| 5 | 3 (all nit) | **GA: YES** |
+
+Round 1 paid for the whole loop before the reviewer saw a frame: driving the
+upload through a real browser exposed that htmx matches `responseHandling`
+codes as **regexes** — the `"2xx"` notation from the design doc never matches
+status 201, so **no successful upload ever swapped its outcome card in a
+real browser** (curl-level tests were all green; the fragment was correct,
+the swap was dead). Fixed with `"[23].."`-style codes; row deletes (204 +
+`hx-swap="delete"`) verified in-browser too.
+
+Biggest fixes across rounds: account sub-header (counts, chain) moved inside
+the swap region (stale-count blocker); `chain ✓ (-1/-1 links)` on
+zero-parsed accounts eliminated; the run view's terminal state ends in an
+action (parser saved → N statements parsed → go to account), never a
+contradictory pair of banners; PDF auto-fits the pane so amounts stay
+readable; timeline marks the inspected round; launch/pin are anchored
+popovers with Close; the JS terminal handler no longer stomps semantic
+status colors.
+
+One attempted disprove taught the rule again: the reviewer flagged registry
+numeric columns as left-aligned, the CSS said `.num { text-align: right }` —
+the DOM said left, because `.table td` outranked `.num`. Verified in the DOM
+before ruling, fixed with `.table td.num`.
+
+Keep-list (deliberate, do not re-flag): bare locale-neutral amounts (no
+currency field in the canonical dict — a guessed symbol would lie);
+registry rows informational only; no token/cost metrics (the harness does
+not account tokens — duration shown); draft-code pane plain text; hex
+statement id as small metadata; popovers overlay content below them;
+right-aligned em-dash placeholders in numeric columns.
+
+Residuals (nit, post-verdict polish applied without a re-round): action
+button casing unified to lowercase; launch-form buttons on their own footer
+row. Period-column placeholder alignment left as-is (textual column).
 
 A local, single-user web UI over the existing `statementledger` library: users
 upload statement PDFs into **accounts** (one folder per account on disk),
@@ -80,6 +132,10 @@ data/                                   # gitignored (add "data/" to .gitignore)
 │   └── 20261009-141023-a1b2/
 │       ├── run.json                    # argv, account, statement ids, pid, status
 │       └── events.jsonl                # trajectory events (§9.1), copied from the run
+├── registry/                           # USER REGISTRY overlay: parsers distilled
+│   └── au__bank__product__1.py         # at runtime are USER DATA — saved here by
+│                                       # the harness, shadowing same-key built-ins;
+│                                       # never committed, never in package source
 └── cache/
     └── pages/<sha-prefix>/page_0.png   # lazily rasterized PDF pages (§9.3)
 ```
@@ -817,3 +873,54 @@ same rendering with the converged parser's provenance.
 **Later (only if ever needed)** — multi-statement batch upload via
 `BackgroundTasks`; bearer-token + non-localhost bind; anything multi-user
 (out of scope until asked for).
+
+## 12. React SPA at /app (2026-10-09)
+
+The UI grew a React frontend (`web/frontend`: Vite + React + TS + Tailwind v4 +
+shadcn/ui radix-nova/neutral + TanStack Query + react-router, basename `/app`).
+It talks to the SAME routes as the Jinja UI via content negotiation — every
+page route gained a `wants_json` branch returning the page's data, and FastAPI
+serves the built bundle at `/app` with an SPA history fallback (only when
+`web/frontend/dist` exists; a node-less machine just loses `/app`). Dev:
+`npm run dev` in `web/frontend` proxies `/accounts`, `/runs`, `/registry*` to
+:8765. The run view is the flagship screen: the SSE trajectory folds into a
+reducer (`src/pages/run/store.ts`) and the PDF overlay, timeline, and
+code/trace panes render from state — no imperative DOM patching, so
+auto-follow/scrub/code-fetch can't race each other. The Jinja+htmx UI remains
+at `/` until the SPA reaches parity trust, then retires.
+
+SPA review loop (same tour discipline as before; 12 states, external
+fresh-eyes reviewer, verdict ladder):
+
+- **Round 1** — 19 findings → GA: NO. Fixed 15 (ledger truncation vs closing
+  card, Parsed-banner grid stacking, stale `running…` after terminal, bare
+  cancel banner, follow-toggle after terminal, tab anchoring, slug breadcrumb,
+  debit contrast, KiB sizes, loud danger zone, missing empty-state h1,
+  double-boxed dropzone, duplicate CTAs, link affordance). Kept 4 (workspace
+  void when few rounds; no currency symbol — schema has none, exports are
+  symbol-free; `—` on the numeric axis; docstring-punctuated descriptions).
+  Disproved 1 by DOM check (numeric headers are right-aligned).
+- **Round 2** — 11 findings → GA: NO. Real misses fixed (terminal rewrite of
+  `running…` badge text, not just the pulse flag; cancelled/failed end card
+  with icon; "live tail" scoped to the live round; column width hints;
+  transactions/PDF caption alignment; destructive color cascading into the
+  outline button). Disproved the filename-underline claim via
+  `text-decoration` DOM check.
+- **Round 3** — 8 findings → ACCEPTABLE. Fixed all (selected-round highlight,
+  Accounts nav active on child routes, blue in-flight badges, pinned-failure
+  icon + title/body hierarchy, nav/distill icons, mode chip).
+- **Round 4** — verified all round-3 fixes; one nit (model name missing while
+  live — now folded from the `run_started` event, no refetch) → **GA: YES**.
+
+Tour harness: `tools/ui_review/spa_check.mjs` (playwright walk-through, fails
+on console errors); DOM assertions in `check_th.mjs`; prompts
+`prompt-spa-r{1..4}.txt`.
+
+**2026-10-10 — Jinja UI retired.** The React SPA is the only UI, served at `/`
+(assets under `/assets`, history fallback for unknown browser GETs, JSON 404s
+for API clients, legacy `/app/*` links 308 to root). The server is a pure JSON
+API that content-negotiates by Accept header — the SPA's fetches and browsers
+share the same URLs. `web/templates/` and `web/static/` are deleted; htmx
+response handling is gone. Malformed statement ids now 400 instead of leaking
+a store ValueError as a 500. Suite: 91 (SPA-shell tests skip when the bundle
+isn't built).

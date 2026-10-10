@@ -76,11 +76,51 @@ any OpenAI-compatible endpoint works, including a local llama-server.
 Sandboxed execution (no network, rlimits) and a transcription lint keep the
 model honest: it can look, but not smuggle statement data into code.
 
+## Web UI (local)
+
+`web/` is a single-user web UI over the library: accounts as folders,
+drag-in PDF upload, parse with the registry, and hard verification failures
+shown as first-class outcomes (per-parser attempts, not stack traces). No
+database — the filesystem under `data/` is the store. Design:
+[docs/web-ui-design.md](docs/web-ui-design.md).
+
+```console
+$ uv sync --group web
+$ uv run --group web uvicorn web.app:app --host 127.0.0.1 --port 8765
+```
+
+The web stack (FastAPI + Jinja2 + htmx, vendored) lives in a separate
+dependency group; the wheel still ships only `statementledger`. **No auth,
+localhost only** — statements are sensitive financial data. Do not
+port-forward or run on a shared host.
+
+Storage is durable and repo-independent: everything the app writes at
+runtime — accounts, statements, runs, **and parsers distilled through the
+UI** — lives under `STMTLEDGER_WEB_DATA` (default
+`~/.local/share/statementledger`). Distilled parsers go to a user-registry
+*overlay* (`data/registry/`, shadowing same-key built-ins) and are user
+data, never committed; the shipped `src/statementledger/registry/` stays
+curated. To seed the demo accounts into that store:
+
+```console
+$ STMTLEDGER_WEB_DATA=~/.local/share/statementledger \
+      uv run --group web python tools/ui_review/seed.py
+```
+
+When no registered parser verifies a statement, the UI offers one click into
+the distill harness: launch a run (draft for a new bank, maintain to evolve
+the pinned parser), watch it live — round timeline, gate verdicts, and a PDF
+overlay showing what each probe looked at — and on convergence the pending
+statements are parsed automatically with the new parser. Runs need
+`STATEMENTLEDGER_LLM_*` in `.env`; one active run at a time; cancel is always
+one click. `/runs` lists every run; a run against an existing harness
+workdir can be attached (tail-watch, no live selections).
+
 ## Development
 
 ```console
-$ uv sync
-$ uv run pytest                                     # 47 tests
+$ uv sync --group web
+$ uv run --group web pytest                         # 90 tests
 $ uv run python tools/fixtures/gen_fixtures.py      # regenerate fixtures
 $ uv build                                          # wheel: package + registry only
 ```
