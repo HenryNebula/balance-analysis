@@ -44,21 +44,15 @@ def line_text(line: dict) -> str:
 
 def render(lines: list[dict], n: int = 40, start: int = 0,
            width: int = 110) -> None:
-    """Print lines[start:start+n] as a monospace text wall that preserves
-    x positions — each page normalized to `width` columns:
+    """Print lines[start:start+n] as an x-preserving text wall (each page
+    scaled to `width` columns):
 
         [Page 0]
-        038 | Date   Description            Debit      Credit     Balance
-        039 | 01 Feb  STORE 482 PURCHASE    112.33                9,844.21
+        038 | Date   Description       Debit    Balance
+        039 | 01 Feb  STORE 482        112.33   9,844.21
 
-    Line indices are zero-based offsets into `lines` — the same indices you
-    slice with lines[a:b]. Items are placed at a character column derived
-    from their x1 (per-page scale), right-to-left so the money/date columns
-    on the right win collisions and long descriptions clip with "…" instead
-    of mashing into them. Positions are approximations; for exact geometry
-    read the raw [text, x1, x2] triples in lines[i]["items"]. Slice, don't
-    dump: the interesting regions are the TOP (start=0) and the END
-    (start=len(lines)-n; the words that stop the table live there)."""
+    Indices match lines[a:b]. Money columns win collisions; long items clip
+    with "…". Positions are approximate — exact x is in lines[i]["items"]."""
     page_right: dict[int, int] = {}
     for line in lines:
         for _text, _x1, x2 in line["items"]:
@@ -86,18 +80,15 @@ def render(lines: list[dict], n: int = 40, start: int = 0,
 
 def grep(lines: list[dict], pattern: str, regex: bool = False,
          context: int = 0) -> None:
-    """Which lines hold a term — try keywords before guessing labels:
+    """Print the lines whose text holds `pattern`, with indices:
 
         grep(lines, "balance") ->
             003: Opening balance: $25,000.00 CR
-            007: Closing balance: $24,118.09
             2 match(es)
 
-    Substring match on each line's text, case-insensitive (label hunting is
-    case-noisy); regex=True switches to a case-insensitive re.search —
-    write [A-Z] classes when case matters. context=k prints up to k
-    neighboring lines around each hit, "--" between disjoint groups.
-    Prints, returns None: a probe tool — parse() wants anchor_value."""
+    Case-insensitive substring; regex=True for a re.search. context=k adds
+    k neighboring lines, "--" between groups. Probe tool — parse() wants
+    anchor_value."""
     if regex:
         def matches(text: str) -> bool:
             return re.search(pattern, text, re.I) is not None
@@ -293,31 +284,20 @@ def table(lines: list[dict], header: dict | None = None, start: int | None = Non
           stop: int | None = None, stop_terms: tuple[str, ...] | list[str] = (),
           sections: dict[str, str] | None = None,
           merge_continuations: bool = True) -> tuple[list[str], list[dict]]:
-    """Materialize the ledger grid: (columns, rows) — the geometry solver.
+    """The ledger grid as (columns, rows) — the geometry solver:
 
         columns, rows = table(lines, stop_terms=("Transactions stop",))
-        -> (["Date", "Description", "Debit", "Credit", "Balance"],
-            [{"Date": "01 Feb", "Description": "STORE 482 PURCHASE",
-              "Debit": "112.33", "Credit": "", "Balance": "9,844.21",
-              "_line": 8}, ...])
+        -> (["Date", "Description", "Amount", "Balance"],
+            [{"Date": "01 Feb", "Description": "STORE 482", "Amount": "112.33",
+              "Balance": "9,844.21", "_line": 8}, ...])
 
-    - header: the header line (auto-detected when omitted; pass lines[i]
-      yourself when the detector misses — a line whose items are exactly
-      common column words)
-    - start/stop: data line range (default: after the header, to the first
-      line containing any stop term, else end of lines)
-    - sections: {label: marker} — every row carries "_section" set to the
-      label of the last marker line at or above it (sectioned statements:
-      withdrawals/deposits blocks over one shared column set)
-    - merge_continuations: rows with no date and no money are wrapped
-      descriptions — they merge into the NEXT row (printers set the wrap
-      line above the money row); a trailing orphan stays its own row.
-      Banks that wrap BELOW the money row differ: audit with "_line".
-
-    Column boundaries are the midpoints between adjacent header item
-    centers, edge columns open-ended — the grid a human sees. Page
-    furniture is dropped; every row carries "_line" (its index into lines)
-    so merges stay auditable. Never rebuild this grid by hand in parse()."""
+    header auto-detected (pass lines[i] to override). start/stop bound the
+    data range; stop_terms cuts at the first match. sections={label:
+    marker} tags each row "_section". merge_continuations: date-less,
+    money-less rows are wrapped descriptions, merged into the NEXT row
+    (banks that wrap below differ — audit via "_line"). Column bounds are
+    header-item midpoints; page furniture is dropped. Never rebuild this
+    by hand."""
     header = header or _find_header(lines)
     if header is None:
         raise ValueError(
@@ -403,15 +383,8 @@ def table(lines: list[dict], header: dict | None = None, start: int | None = Non
 
 def render_table(columns: list[str], rows: list[dict],
                  width: int = 28) -> None:
-    """Print the materialized grid as an aligned table — read it like a page:
-
-        Date   | Description           | Debit    | Balance
-        ------+-----------------------+----------+---------
-        01 Feb | STORE 482 PURCHASE    | 112.33   | 9,844.21
-
-    Empty columns are omitted; cells wider than `width` chars are capped
-    with "…". Pair with table(): columns, rows = table(...), then
-    render_table(columns, rows)."""
+    """Print a table()'s (columns, rows) aligned, like a page: empty
+    columns omitted, cells wider than `width` capped with "…"."""
     def cell(row: dict, column: str) -> str:
         text = str(row.get(column, ""))
         return (text[: width - 1] + "…") if len(text) > width else text
@@ -437,16 +410,12 @@ def _values_on_line(line: dict, term: str) -> list[str] | None:
 
 
 def anchor_value(lines: list[dict], term: str, index: int = 0) -> str:
-    """The printed value beside a label — the beside() every parser needs:
+    """The value printed beside a label:
 
         anchor_value(lines, "Account No:") -> "0123 4567 8901"
 
-    The index-th (default first) line whose text contains `term`
-    (case-insensitive) contributes every item RIGHT of the label item —
-    same-line rightward, the y-alignment the printer itself used. Raises
-    ValueError quoting the printed line when the label carries nothing
-    beside it, and saying the term appears nowhere otherwise: grep()
-    first when unsure what the label actually says."""
+    Case-insensitive; index picks a later match. Raises quoting the printed
+    line when the label has nothing beside it — grep() first when unsure."""
     seen = 0
     quoted = None
     for line in lines:
@@ -465,19 +434,15 @@ def anchor_value(lines: list[dict], term: str, index: int = 0) -> str:
 
 
 def regions(lines: list[dict], window: int = 6) -> list[dict]:
-    """Indicative layout map — where the table/form/prose blocks sit:
+    """Indicative table/form/prose map of the statement:
 
         regions(lines) ->
-            lines 000-005  FORM    5/6 label: value (e.g. "Opening balance: ...")
-            lines 007-040  TABLE   columns x≈96,180,310,384 · 79% money · header at 007
-            lines 041-042  PROSE   7+ words/line, no money
+            lines 001-005  FORM    100% label: value
+            lines 007-040  TABLE   columns x≈96,180,310 · 79% money · header at 007
 
-    Heuristic, NOT truth: windows of consecutive non-furniture lines vote on
-    money/date density, recurrent x-centers (the column signature), label:
-    value shape, and word count; majority wins per line. Bare digit runs
-    (reference numbers) read as money — the ratios are indicative. Use the
-    map to aim render()/grep()/table() at the right slice, never as a
-    verdict. Returns the region dicts and prints the report."""
+    Heuristic — windows vote on money/date density, recurrent x-centers,
+    label: value shape. Aim render()/grep()/table() with it, never trust it
+    as a verdict. Returns the region dicts."""
     furniture = _page_furniture(lines)
     active = [i for i in range(len(lines)) if i not in furniture]
     if not active:

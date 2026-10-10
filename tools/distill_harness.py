@@ -66,139 +66,96 @@ COMPACT_CHARS = int(os.environ.get("STATEMENTLEDGER_COMPACT_CHARS", "120000"))
 # (compaction at 120k chars ≈ 30k tokens: lands ~round 8 of a 30-round run,
 # re-triggers every few rounds; lower it for small-context local models)
 
-PY_SYSTEM_PROMPT = """You are a data scientist writing bank-statement parsers
-in plain Python. A statement arrives as FRAMES — extracted layout, plain data:
+PY_SYSTEM_PROMPT = """You write bank-statement parsers in plain Python. A
+statement arrives as FRAMES — extracted layout:
 
-    {"name": ..., "lines": [{"page": int, "y": int, "items": [[text, x1, x2], ...]}, ...]}
+    {"name": ..., "lines": [{"page": int, "y": int, "items": [[text, x1, x2], ...]}]}
 
-y grows downward; items on a line are in print order. A ledger is a geometry
-problem: the header row names the columns, every item's x-center falls under
-one of them, and label values (account number, opening/closing balance) sit
-on the same line as their label. Plain loops and re solve it.
+y grows downward; items are in print order. A ledger is geometry: the header
+row names the columns, an item's x-center falls under one of them, and label
+values sit on the same line as their label.
 
-Your deliverable — a complete parser module. Nothing else persists:
+Deliverable — a complete parser module. Nothing else persists:
 
-    KEY = "us__bank__product__1"     # registry key, lowercase
-    def parse(frames) -> dict:       # pure: derives everything from frames
-        ...
+    KEY = "us__bank__product__1"          # registry key, lowercase
+    def parse(frames) -> dict:            # pure: derives everything from frames
         return {
-            "bank_name": str,
-            "account_number": str,
-            "opening_balance": float,
-            "closing_balance": float,
+            "bank_name": str, "account_number": str,
+            "opening_balance": float, "closing_balance": float,
             "transactions": [
-                {"date": "YYYY-MM-DD" or None,  # yearless tokens: take the
-                 "description": str,             # year from the statement period
+                {"date": "YYYY-MM-DD" or None,   # yearless: year from the period
+                 "description": str,
                  "amount": float,                # SIGNED: credits +, debits -
-                 "balance": float or None},      # printed running balance, if any
+                 "balance": float or None},      # printed running balance
             ],
-            # OPTIONAL, but bind it when the statement prints section totals
-            # ("Total deposits and other additions", "Total withdrawals ...").
-            # Each total is an INDEPENDENT accuracy check — kind "positive"
-            # matches Σ positive amounts, "negative" matches Σ |negatives|, "all"
-            # matches the plain sum:
-            "totals": [
-                {"label": "Total deposits and other additions",
-                 "kind": "positive", "value": 1234.56},
-            ],
+            # optional, when the statement prints section totals — each an
+            # independent check: "positive" = Σ positive amounts,
+            # "negative" = Σ |negatives|, "all" = plain sum:
+            "totals": [{"label": "Total deposits", "kind": "positive",
+                        "value": 1234.56}],
         }
 
-Rules of the artifact:
-- parse() may import ONLY the stdlib (re, datetime, json, collections, ...)
-  plus statementledger. No files, network, or processes; no
-  try/except — errors must crash loudly.
-- No literals for printed amounts, dates, or transaction descriptions (the
-  lint rejects them). Label TERMS like "Opening balance:" are bank
-  furniture — literals are fine and expected.
-- It must generalize across months of THIS bank: derive columns from each
-  statement's own header row and stop terms from the words it prints; never
-  hardcode one month's geometry or contents.
-- Presentation semantics: a date-less row inherits the previous row's date;
-  a balance-less row gets the running computed balance (start from opening,
-  add each amount in order, ROUNDING TO 2 DECIMALS after every step — money
-  is exactly 2dp, never 17800.230000000003). Never leave None where the
-  statement's own arithmetic supplies the value — downstream consumers want
-  a complete ledger, not holes the printer happened to leave.
+Rules:
+- parse() imports stdlib + statementledger only; no files, network,
+  processes; no try/except — errors must crash loudly.
+- No literals for printed amounts, dates, or descriptions (the lint rejects
+  them). Label terms and column words are fine.
+- Derive columns, labels, and stop terms from each statement's own words —
+  never one month's geometry.
+- Presentation: a date-less row inherits the previous date; a balance-less
+  row gets the running balance (opening + Σ amounts so far, rounded to 2dp
+  at every step — money is exactly 2dp).
 
-Sandbox environment (import and go):
-- import statementledger as pl
-- THE DOCSTRINGS ARE THE MANUAL: every helper's full contract, examples and
-  failure modes are one print away — print(pl.table.__doc__),
-  print(pl.parse_amount.__doc__), help(pl).
-- pl.load_frames() -> the statements' frames LIST (frames.json in cwd).
-  parse() receives ONE element of it: a single statement dict
-  {"name": ..., "lines": [...]} — the #1 drafting crash is treating frames
-  as something else.
-- THE GRID IS SOLVED FOR YOU — never rebuild the column geometry by hand:
-  columns, rows = pl.table(lines, stop_terms=(...)) materializes the ledger
-  (header-midpoint columns, page furniture dropped, wrapped descriptions
-  merged, _line index on every row; sections={label: marker} for
-  withdrawals/deposits blocks); pl.render_table(columns, rows) prints it
-  aligned. Pass header=lines[i] yourself when auto-detection misses.
-- pl.render(lines, n=40, start=0) — the page as an x-preserving text wall
-  with line indices (same indices you slice lines[a:b] with); pl.grep(lines,
-  "balance", context=2) — which lines hold a term (try keywords BEFORE
-  guessing a label); pl.regions(lines) — indicative table/form/prose map of
-  the statement.
-- pl.anchor_value(lines, "Account No:") — the value printed beside a label
-  (never hand-roll a beside()); raises quoting the printed line on a miss.
-- pl.items(frames) -> [{text, x1, x2, cx, y, page, line}] per printed item
+Sandbox — import statementledger as pl; the docstrings are the manual
+(print(pl.table.__doc__), help(pl)):
+- pl.load_frames() -> the frames LIST; parse() receives ONE element of it.
+- THE GRID IS SOLVED — never rebuild the geometry by hand:
+  pl.table(lines, stop_terms=(...)) -> (columns, rows): header-midpoint
+  columns, furniture dropped, wrapped descriptions merged, _line per row,
+  sections={label: marker} for blocks; pl.render_table(columns, rows)
+  prints it. Pass header=lines[i] when auto-detection misses.
+- pl.render(lines, n, start) — the page as an x-preserving text wall with
+  line indices (same ones you slice lines[a:b] with); pl.grep(lines,
+  "balance", context=2) — which lines hold a term; pl.regions(lines) —
+  indicative table/form/prose map.
+- pl.anchor_value(lines, "Account No:") — value beside a label; never
+  hand-roll a beside().
+- pl.items(frames) -> per-item rows with cx.
 - pl.parse_amount("$1,234.56 DR") -> signed float (CR +, DR -, parens
-  negate); None for unreadable tokens — None is NOT zero, it means "no
-  money here" (a description-wrap line). Custom extraction regex is fine
-  for exotic formats — keep the None contract.
-- pl.parse_date("05 Mar", default_year=2026) -> "2026-03-05"; None if not
-  date-shaped. The default year comes from the statement itself (grep for
-  a 4-digit year if no period label prints one).
-- pl.reconcile(amounts, opening, closing, balances=None) — the ledger check;
-  must print OK before you finish
+  negate); None = no money here, NOT zero. Custom regex is fine for exotic
+  formats if unreadable stays None. pl.parse_date("05 Mar",
+  default_year=y) -> ISO date or None.
+- pl.reconcile(amounts, opening, closing, balances=None) — must print OK
+  before you finish.
 
-Verification is arithmetic, not opinion: the harness imports your module and
-runs parse() on EVERY statement given; each must yield a valid canonical dict
-AND reconcile (opening + sum(amounts) == closing; printed balances must track
-when present; bound totals must match their parsed sums — they catch what
-end-to-end reconcile cannot: a dropped offsetting pair or a double sign
-flip still balances). Every gate error is remedial — crashes carry a HINT,
-schema errors name the row and the fix, reconcile failures name the
-divergent row. Read the error; it describes exactly what to change. End the
-script with a demo guarded by if __name__ == "__main__": parse the first
-statement, print it, reconcile.
+Verification is arithmetic: parse() runs on EVERY statement; each must
+validate and reconcile (opening + Σ amounts == closing; printed balances
+track; bound totals match — they catch dropped offsetting pairs and sign
+flips that still balance). Gate errors are remedial: crashes carry a HINT,
+schema errors name the row, reconcile failures name the divergence. End
+with a demo under if __name__ == "__main__": parse, print, reconcile.
 """
 
 PY_CONTRACT = """Contract for every response:
-- ONE complete runnable python script in a single ```python fence: imports,
-  KEY, def parse(frames), then the demo guarded by if __name__ == "__main__".
-- KEY is cc__bank__product__n, lowercase, derived from THE STATEMENT (its
-  country, its printed bank name, the account product) — never the template
-  filler words: exactly four '__'-separated segments, and the bank/product
-  segments must not be bare "bank"/"product"/"demo".
-- ONE ACCOUNT: parse(frames) returns the canonical dict. SEVERAL ACCOUNTS in
-  one PDF (repeated table headers, each with its own account number and
-  balances): return a LIST of canonical dicts, one per account — every
-  account table in the PDF must be covered, each ledger reconciles on its
-  own, and a verified single ledger over a multi-account PDF is PARTIAL
-  coverage the gate cannot see.
-- KEEP IT SHORT: under ~70 lines. No try/except anywhere — an error must
-  crash; the harness feeds the exact traceback back to you.
-- Literals only for label terms / column header words — never for printed
-  amounts, dates, or transaction descriptions.
-- READ amounts from the statement's amount/activity columns. NEVER compute
-  an amount from balances (closing - opening, balance-to-balance deltas):
-  that reconciles by construction — a tautology the gate cannot see, and
-  a parser shipping it is a false verification. If the statement prints
-  activity totals ("Total Deposits", "Deposits", "Withdrawals", ...), you
-  MUST bind them into totals[] — the independent sums that catch derived
-  amounts, dropped rows, and sign flips end-to-end reconcile cannot see.
-- BURNER PROBES: to just LOOK, first line exactly "# probe" (print
-  anything). Probes run any time and are never counted against you — but
-  they are discarded: only a full script can converge the run (past 90% of
-  turns the feedback reminds you).
-- READ BEFORE YOU TRUST: the words that terminate the table live at the
-  END of the statement — pl.render(lines, 10, start=len(lines) - 10) and
-  read them; never guess a stop term or a label, pl.grep for it first.
-- Never finish while your own pl.reconcile prints FAIL — the drift names
-  what is wrong (a stop term cutting the table early, a dropped row, a
-  wrong sign)."""
+- ONE complete script in a single ```python fence: imports, KEY, def
+  parse(frames), demo under if __name__ == "__main__".
+- KEY is cc__bank__product__n, lowercase, from THE STATEMENT's country,
+  printed bank name, and product — never bare "bank"/"product"/"demo".
+- One account: the canonical dict. Several accounts in one PDF (repeated
+  headers, each with own balances): a LIST of dicts, one per account, all
+  covered — a single ledger over a multi-account PDF is partial coverage
+  the gate cannot see.
+- Under ~70 lines. No try/except — the traceback comes back verbatim.
+- Literals only for label terms / header words — never amounts, dates,
+  descriptions.
+- READ amounts from the amount columns; never compute them from balances
+  (a tautology the gate cannot see). Bind printed activity totals into
+  totals[].
+- Probes (first line "# probe") run any time and are discarded — only a
+  full script converges the run (past 90% of turns you are reminded).
+- Read the END of the statement before trusting a stop word; grep instead
+  of guessing a label.
+- Never finish while your own pl.reconcile prints FAIL."""
 
 PY_EXAMPLE = '''import re
 
@@ -250,24 +207,16 @@ if __name__ == "__main__":
                  [t["balance"] for t in statement["transactions"]])
 '''
 
-PY_TASK_TEMPLATE = """Statement to parse: {name} ({pages} pages, {lines} layout
-lines). frames.json in the working directory holds it; pl.load_frames() reads
-it.
+PY_TASK_TEMPLATE = """Statement to parse: {name} ({pages} pages, {lines} lines).
+frames.json in cwd; pl.load_frames() reads it.
 
-Aim your exploration: pl.regions(lines) maps the table/form/prose blocks,
-pl.grep(lines, "...") finds which lines hold a term, pl.render(...) shows a
-slice as the printed page, and pl.table(...) materializes the ledger grid
-once the header is known. Explore until the layout is clear (labels, header
-row, the words that end the table, wrapped-description rows, EVERY account
-table if the PDF holds several accounts), then write the parser:
-KEY + def parse(frames) returning the canonical dict (or a LIST of dicts,
-one per account), ending with the demo
-under if __name__ == "__main__": print the parsed statement and reconcile.
-Return the complete script in one ```python fence.
-
-When unsure what a label or stop word says, first return a BURNER PROBE —
-first line "# probe", print what you need (pl.render(...) slices, pl.grep
-for candidate words). It is discarded; then return the full script."""
+Aim first: pl.regions(lines) maps the blocks, pl.grep(lines, term) finds
+labels and stop words, pl.render(...) shows a slice, pl.table(...) gives
+the grid. Then the parser: KEY + def parse(frames) — the canonical dict, or
+a LIST with one dict per account table — ending with the demo under
+if __name__ == "__main__": print and reconcile. Return the complete script
+in one ```python fence. Unsure what something says? Burner probe (first
+line "# probe") and print it."""
 
 
 GATE_RUNNER = '''import importlib.util
