@@ -58,7 +58,7 @@ export function Timeline({
                     : "border-transparent bg-card",
                 )}
               >
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
                   <button
                     onClick={() => onSelect(number)}
                     className="rounded px-1 font-mono text-xs font-semibold hover:bg-muted"
@@ -70,7 +70,11 @@ export function Timeline({
                     <Badge
                       key={b.id}
                       variant="secondary"
-                      className={cn("font-normal", TONES[b.tone], b.id === "ran" && r.running && "animate-pulse")}
+                      className={cn(
+                        "max-w-full truncate font-normal",
+                        TONES[b.tone],
+                        b.id === "ran" && r.running && "animate-pulse",
+                      )}
                     >
                       {b.text}
                     </Badge>

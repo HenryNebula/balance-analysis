@@ -27,6 +27,8 @@ export interface RunViewState {
   terminal: boolean
   finishMessage: string | null
   model: string // from run_started — available while live, no refetch needed
+  convergedKey: string // from the converged event (attach/canned runs may
+  // never persist it into the run record — the banner needs it anyway)
 }
 
 export const initialRunState: RunViewState = {
@@ -38,6 +40,7 @@ export const initialRunState: RunViewState = {
   terminal: false,
   finishMessage: null,
   model: "",
+  convergedKey: "",
 }
 
 function round(state: RunViewState, number: number): RoundState {
@@ -154,6 +157,7 @@ export function runReducer(state: RunViewState, event: RunEvent | { type: "run_s
         ...state,
         status: "converged",
         terminal: true,
+        convergedKey: event.key || "",
         finishMessage: `Converged — parser ${event.key || ""}${event.saved ? " saved to the registry" : ""}`,
       })
     case "failed":

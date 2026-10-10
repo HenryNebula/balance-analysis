@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Link, useParams } from "react-router-dom"
 import { useQueryClient } from "@tanstack/react-query"
 import { Button } from "@/components/ui/button"
@@ -25,6 +25,41 @@ export default function RunView() {
   const [selected, setSelected] = useState<number | null>(null)
   const [follow, setFollow] = useState(true)
   const [paneMode, setPaneMode] = useState<"code" | "output">("code")
+
+  // -- resizable trajectory sidebar (width persists across visits) ----------
+  const [sidebarW, setSidebarW] = useState(
+    () => Number(localStorage.getItem("run-sidebar-w")) || 432,
+  )
+  const sidebarWRef = useRef(sidebarW)
+  sidebarWRef.current = sidebarW
+  const dragging = useRef(false)
+
+  useEffect(() => {
+    const move = (e: PointerEvent) => {
+      if (!dragging.current) return
+      // width from the right edge: drag left = wider sidebar
+      const w = window.innerWidth - e.clientX
+      setSidebarW(Math.min(760, Math.max(320, w)))
+    }
+    const up = () => {
+      if (!dragging.current) return
+      dragging.current = false
+      document.body.style.userSelect = ""
+      localStorage.setItem("run-sidebar-w", String(sidebarWRef.current))
+    }
+    window.addEventListener("pointermove", move)
+    window.addEventListener("pointerup", up)
+    return () => {
+      window.removeEventListener("pointermove", move)
+      window.removeEventListener("pointerup", up)
+    }
+  }, [])
+
+  const startDrag = (e: React.PointerEvent) => {
+    e.preventDefault()
+    dragging.current = true
+    document.body.style.userSelect = "none"
+  }
 
   const lastRound = state.order.length ? state.order[state.order.length - 1] : null
 
@@ -71,20 +106,27 @@ export default function RunView() {
 
   return (
     <div className="flex h-svh flex-col bg-background">
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
-        <Link
-          to={`/accounts/${run.account_slug}`}
-          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-        >
-          <ArrowLeft className="size-3.5" /> {run.display_name || run.account_slug}
-        </Link>
-        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
-          <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-xs text-secondary-foreground">
-            {run.mode === "maintain" ? `maintain ${run.key ?? ""}` : "draft"}
+      <header className="flex h-12 min-w-0 shrink-0 items-center gap-3 border-b px-4">
+        {/* left cluster truncates; the status group never shrinks — long
+            account names or models must not push the status chip off-screen */}
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <Link
+            to={`/accounts/${run.account_slug}`}
+            className="inline-flex min-w-0 items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="size-3.5 shrink-0" />
+            <span className="truncate">{run.display_name || run.account_slug}</span>
+          </Link>
+          <span className="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
+            <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 font-mono text-xs text-secondary-foreground">
+              {run.mode === "maintain" ? `maintain ${run.key ?? ""}` : "draft"}
+            </span>
+            {state.model || run.model ? (
+              <span className="truncate">{state.model || run.model}</span>
+            ) : null}
           </span>
-          {(state.model || run.model) ? <span>{state.model || run.model}</span> : null}
-        </span>
-        <div className="ml-auto flex items-center gap-2">
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
           <StatusChip status={state.status} />
           {!state.terminal ? (
             <Button
@@ -113,7 +155,19 @@ export default function RunView() {
           selection={shownSelection}
         />
 
-        <aside className="flex w-[27rem] shrink-0 flex-col border-l bg-muted/20">
+        <aside
+          className="relative flex shrink-0 flex-col border-l bg-muted/20"
+          style={{ width: sidebarW }}
+        >
+          {/* drag to resize — the width persists in localStorage */}
+          <div
+            onPointerDown={startDrag}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize trajectory sidebar"
+            title="Drag to resize"
+            className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize touch-none after:absolute after:inset-y-0 after:left-1/2 after:w-px after:bg-transparent after:transition-colors hover:after:bg-primary/50"
+          />
           <div className="border-b bg-card px-3 py-2 text-sm font-semibold">Trajectory</div>
           <Timeline
             state={state}
@@ -127,10 +181,13 @@ export default function RunView() {
             state.status === "converged" ? (
               <div className="space-y-2 border-t border-emerald-600/30 bg-emerald-600/5 p-3 text-sm">
                 <div className="font-medium text-emerald-700 dark:text-emerald-400">
-                  Parser {run.converged_key || "?"}{" "}
-                  {run.auto_parse === null
-                    ? "verified but not registered (attach or canned run)."
-                    : "saved to the registry."}
+                  {(() => {
+                    const key = run.converged_key || state.convergedKey
+                    const registered = run.auto_parse !== null
+                    return key
+                      ? `Parser ${key} ${registered ? "saved to the registry." : "verified but not registered (attach or canned run)."}`
+                      : "Parser verified but not registered (attach or canned run)."
+                  })()}
                 </div>
                 {run.auto_parse && run.auto_parse.length ? (
                   <div className="text-muted-foreground">
