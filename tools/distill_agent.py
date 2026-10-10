@@ -469,7 +469,15 @@ def footer(ctx: "Ctx", turn: int, turns: int) -> str:
 
 
 def message_chars(messages: list[dict]) -> int:
-    return sum(len(str(m.get("content", ""))) for m in messages)
+    """Total payload chars — content AND tool-call arguments. A write's
+    parser source and a python probe's code ride in the arguments; not
+    counting them made compaction fire ~57% late in the qwen runs."""
+    total = 0
+    for message in messages:
+        total += len(str(message.get("content", "")))
+        for tool_call in message.get("tool_calls") or []:
+            total += len(str(tool_call.get("function", {}).get("arguments", "")))
+    return total
 
 
 def _turn_groups(messages: list[dict]) -> list[list[dict]]:
@@ -807,16 +815,30 @@ def _tool_run(ctx: Ctx) -> tuple[str, str]:
     return payload + note, "run"
 
 
-def call_key(name: str, arguments: str) -> str | None:
+def call_key(name: str, arguments: str, ctx: Ctx) -> str | None:
     """Canonical (tool, args) identity for duplicate detection; None when
-    the arguments don't parse (those get their own error feedback)."""
+    the arguments don't parse (those get their own error feedback). run
+    and read take no arguments but consume parser.py — they key on the
+    file's current content, so re-running after an edit is never a
+    duplicate and re-running without one always is."""
     try:
-        return name + " " + json.dumps(json.loads(arguments), sort_keys=True)
+        args = json.dumps(json.loads(arguments), sort_keys=True)
     except (ValueError, json.JSONDecodeError, TypeError):
         return None
+    if name in ("run", "read"):
+        parser = ctx.workdir / "parser.py"
+        version = hash(parser.read_text()) if parser.exists() else "none"
+        return f"{name} parser#{version}"
+    return f"{name} {args}"
 
 
 def duplicate_note(name: str, first_turn: int) -> str:
+    if name in ("run", "read"):
+        return (
+            f"NOTE: {name} already ran against this exact parser.py (turn "
+            f"{first_turn}) — the verdict will not change until you edit "
+            "parser.py."
+        )
     return (
         f"NOTE: identical {name} call was already made (turn {first_turn}) "
         "— the result is the same. Vary the arguments or take a different "
@@ -825,6 +847,12 @@ def duplicate_note(name: str, first_turn: int) -> str:
 
 
 def refusal_note(name: str, occurrences: int) -> str:
+    if name in ("run", "read"):
+        return (
+            f"ERROR: {name} has been called {occurrences} times against "
+            "this exact parser.py. The verdict does not change without an "
+            "edit — use edit (or write), then run again."
+        )
     return (
         f"ERROR: this exact {name} call has already run {occurrences} times "
         "with this exact result (see above). Refusing to run it again — "
@@ -935,6 +963,7 @@ def agent_loop(
         if saved > 0:
             trace.log(f"turn {turn} context elided", f"{saved} chars saved")
             seen_calls.clear()  # post-elision repeats re-fetch lost output
+        request_chars = message_chars(messages)  # what this turn's call costs
         try:
             raw = chat(messages, TOOLS, temperature=escape_temperature)
         except RuntimeError as error:
@@ -965,7 +994,7 @@ def agent_loop(
             function = call.get("function", {})
             tool_name = function.get("name", "")
             arguments = function.get("arguments", "{}")
-            key = call_key(tool_name, arguments)
+            key = call_key(tool_name, arguments, ctx)
             note = None
             result = None
             if key is not None:
@@ -1022,7 +1051,7 @@ def agent_loop(
         summary = (f"{ctx.last_gate.get('clean', 0)}/{len(statements)} clean"
                    if ran and ctx.last_gate else
                    "lint fail" if ran else "+".join(dict.fromkeys(kinds)))
-        trace.line(f"turn {turn}: {summary}")
+        trace.line(f"turn {turn}: {summary} · {request_chars // 1000}k chars")
         history.append({"turn": turn,
                         "calls": [c.get("function", {}).get("name") for c in calls],
                         "outcome": summary})

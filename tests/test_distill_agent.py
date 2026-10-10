@@ -105,6 +105,83 @@ def test_duplicate_call_gets_a_note_and_results_are_logged(tmp_path):
     assert "tool result: grep" in log and "tool result: run" in log
 
 
+def test_run_after_edit_is_never_a_duplicate(tmp_path):
+    ctx_frames = copper_frames()
+    (tmp_path / "frames.json").write_text(json.dumps(ctx_frames))
+    broken = PARSER.read_text().replace('"Transactions stop here."',
+                                        '"Never printed anywhere"')
+    script = [
+        call("write", {"content": broken}, "c1"),
+        call("run", {}, "c2"),                 # verdict: 0/1 — not verified
+        call("edit", {"old": '"Never printed anywhere"',
+                      "new": '"Transactions stop here."'}, "c3"),
+        call("run", {}, "c4"),                 # NEW parser content: fresh run
+    ]
+    state = {"i": 0}
+    seen_tools: list[str] = []
+
+    def fake_chat(messages, tools, temperature=0.0):
+        seen_tools.extend(m["content"] for m in messages if m["role"] == "tool")
+        reply = script[state["i"]]
+        state["i"] += 1
+        return reply
+
+    trace = agent.Trace(tmp_path)
+    artifact, verified, _ = agent.agent_loop(
+        [Path("fixture.pdf")], tmp_path, 10, trace, frames=ctx_frames,
+        chat=fake_chat)
+    trace.close()
+    assert verified  # the post-edit run re-gated and finished the task
+    assert not any("identical run call" in c or "already ran against" in c
+                   for c in seen_tools)
+
+
+def test_run_same_parser_refused_with_verdict_wording(tmp_path):
+    ctx_frames = copper_frames()
+    (tmp_path / "frames.json").write_text(json.dumps(ctx_frames))
+    broken = PARSER.read_text().replace('"Transactions stop here."',
+                                        '"Never printed anywhere"')
+    script = [
+        call("write", {"content": broken}, "c1"),
+        call("run", {}, "c2"),                 # occurrence 1: executes
+        call("run", {}, "c3"),                 # occurrence 2: NOTE
+        call("run", {}, "c4"),                 # occurrence 3: REFUSED
+        call("edit", {"old": '"Never printed anywhere"',
+                      "new": '"Transactions stop here."'}, "c5"),
+        call("run", {}, "c6"),
+    ]
+    state = {"i": 0}
+    seen_tools: list[str] = []
+
+    def fake_chat(messages, tools, temperature=0.0):
+        seen_tools.extend(m["content"] for m in messages if m["role"] == "tool")
+        reply = script[state["i"]]
+        state["i"] += 1
+        return reply
+
+    trace = agent.Trace(tmp_path)
+    artifact, verified, _ = agent.agent_loop(
+        [Path("fixture.pdf")], tmp_path, 10, trace, frames=ctx_frames,
+        chat=fake_chat)
+    trace.close()
+    assert verified
+    notes = [c for c in seen_tools if "verdict will not change until you edit" in c]
+    refusals = [c for c in seen_tools if "does not change without an edit" in c]
+    assert notes and refusals
+
+
+def test_message_chars_counts_tool_call_arguments():
+    messages = [
+        {"role": "user", "content": "x" * 100},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "write",
+                                      "arguments": "y" * 500}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "z" * 50},
+    ]
+    assert agent.message_chars(messages) == 650
+
+
 def test_circuit_breaker_refuses_third_identical_call(tmp_path):
     ctx_frames = copper_frames()
     (tmp_path / "frames.json").write_text(json.dumps(ctx_frames))
