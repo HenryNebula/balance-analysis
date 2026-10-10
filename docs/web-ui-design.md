@@ -873,3 +873,45 @@ same rendering with the converged parser's provenance.
 **Later (only if ever needed)** — multi-statement batch upload via
 `BackgroundTasks`; bearer-token + non-localhost bind; anything multi-user
 (out of scope until asked for).
+
+## 12. React SPA at /app (2026-10-09)
+
+The UI grew a React frontend (`web/frontend`: Vite + React + TS + Tailwind v4 +
+shadcn/ui radix-nova/neutral + TanStack Query + react-router, basename `/app`).
+It talks to the SAME routes as the Jinja UI via content negotiation — every
+page route gained a `wants_json` branch returning the page's data, and FastAPI
+serves the built bundle at `/app` with an SPA history fallback (only when
+`web/frontend/dist` exists; a node-less machine just loses `/app`). Dev:
+`npm run dev` in `web/frontend` proxies `/accounts`, `/runs`, `/registry*` to
+:8765. The run view is the flagship screen: the SSE trajectory folds into a
+reducer (`src/pages/run/store.ts`) and the PDF overlay, timeline, and
+code/trace panes render from state — no imperative DOM patching, so
+auto-follow/scrub/code-fetch can't race each other. The Jinja+htmx UI remains
+at `/` until the SPA reaches parity trust, then retires.
+
+SPA review loop (same tour discipline as before; 12 states, external
+fresh-eyes reviewer, verdict ladder):
+
+- **Round 1** — 19 findings → GA: NO. Fixed 15 (ledger truncation vs closing
+  card, Parsed-banner grid stacking, stale `running…` after terminal, bare
+  cancel banner, follow-toggle after terminal, tab anchoring, slug breadcrumb,
+  debit contrast, KiB sizes, loud danger zone, missing empty-state h1,
+  double-boxed dropzone, duplicate CTAs, link affordance). Kept 4 (workspace
+  void when few rounds; no currency symbol — schema has none, exports are
+  symbol-free; `—` on the numeric axis; docstring-punctuated descriptions).
+  Disproved 1 by DOM check (numeric headers are right-aligned).
+- **Round 2** — 11 findings → GA: NO. Real misses fixed (terminal rewrite of
+  `running…` badge text, not just the pulse flag; cancelled/failed end card
+  with icon; "live tail" scoped to the live round; column width hints;
+  transactions/PDF caption alignment; destructive color cascading into the
+  outline button). Disproved the filename-underline claim via
+  `text-decoration` DOM check.
+- **Round 3** — 8 findings → ACCEPTABLE. Fixed all (selected-round highlight,
+  Accounts nav active on child routes, blue in-flight badges, pinned-failure
+  icon + title/body hierarchy, nav/distill icons, mode chip).
+- **Round 4** — verified all round-3 fixes; one nit (model name missing while
+  live — now folded from the `run_started` event, no refetch) → **GA: YES**.
+
+Tour harness: `tools/ui_review/spa_check.mjs` (playwright walk-through, fails
+on console errors); DOM assertions in `check_th.mjs`; prompts
+`prompt-spa-r{1..4}.txt`.

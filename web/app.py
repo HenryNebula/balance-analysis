@@ -222,6 +222,15 @@ def create_app(data_root: Path | None = None,
         rows.sort(key=lambda r: r["account"]["display_name"].lower())
         return rows
 
+    def _account_rows_json() -> list[dict]:
+        """Compact rows for the SPA: no full metas/ledger payloads."""
+        return [{
+            "account": row["account"], "total": len(row["metas"]),
+            "parsed": row["parsed"], "failed": row["failed"],
+            "latest": row["latest"], "chain": row["chain"],
+            "updated": row["updated"],
+        } for row in _account_rows()]
+
     def _latest_ledger(slug: str) -> dict | None:
         for meta in reversed(store.statements(slug)):
             if meta["status"] == "parsed":
@@ -232,6 +241,8 @@ def create_app(data_root: Path | None = None,
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
+        if wants_json(request):
+            return JSONResponse({"accounts": _account_rows_json()})
         return render("accounts.html", request, accounts=_account_rows(),
                       keys=sl.keys(), error=None)
 
@@ -259,6 +270,8 @@ def create_app(data_root: Path | None = None,
         except ValueError as error:  # name yields no usable slug
             return fail(400, str(error))
         target = f"/accounts/{account['slug']}"
+        if wants_json(request):
+            return JSONResponse(account, status_code=201)
         if request.headers.get("hx-request"):
             return Response(status_code=200, headers={"HX-Redirect": target})
         return RedirectResponse(target, status_code=303)
@@ -268,12 +281,21 @@ def create_app(data_root: Path | None = None,
         account = require_account(slug)
         metas = store.statements(slug)
         _load_llm_env(repo_root)
+        runs_rows = _enriched_runs(_account_runs(slug))
+        if wants_json(request):
+            return JSONResponse({
+                "account": account, "metas": metas,
+                "chain": ledger.chain(metas, sl.TOL),
+                "warnings": ledger.period_warnings(metas),
+                "runs": runs_rows,
+                "llm_model": os.environ.get(
+                    "STATEMENTLEDGER_LLM_MODEL", "")})
         return render("account.html", request, account=account, metas=metas,
                       ledger=_latest_ledger(slug), keys=sl.keys(),
                       outcome=None, error=None,
                       chain=ledger.chain(metas, sl.TOL),
                       warnings=ledger.period_warnings(metas),
-                      runs=_account_runs(slug),
+                      runs=runs_rows,
                       llm_model=os.environ.get(
                           "STATEMENTLEDGER_LLM_MODEL", ""))
 
@@ -305,6 +327,8 @@ def create_app(data_root: Path | None = None,
         account["registry_key_source"] = "user-pinned" if key else None
         store.update_account(account)
         target = f"/accounts/{slug}"
+        if wants_json(request):
+            return JSONResponse(account)
         if request.headers.get("hx-request"):
             return Response(status_code=200, headers={"HX-Redirect": target})
         return RedirectResponse(target, status_code=303)
@@ -352,7 +376,7 @@ def create_app(data_root: Path | None = None,
                     "period": statement["period"],
                     "summary": statement["summary"]}
             for extra in ("key", "attempts", "note", "suggest_pin",
-                          "ambiguous"):
+                          "ambiguous", "pinned"):
                 if outcome.get(extra) is not None:
                     body[extra] = outcome[extra]
             return JSONResponse(body, status_code=status)
@@ -447,12 +471,18 @@ def create_app(data_root: Path | None = None,
                     store.original_pdf(slug, sid), store.root / "cache")
             except Exception:  # noqa: BLE001 - overlay degrades gracefully
                 provenance = None
+        prov_pages = _prov_pages(ledger, provenance)
+        llm_model = os.environ.get("STATEMENTLEDGER_LLM_MODEL", "")
+        if wants_json(request):
+            return JSONResponse({"meta": meta, "ledger": ledger,
+                                 "verified": verified,
+                                 "prov_pages": prov_pages,
+                                 "llm_model": llm_model})
         return render("statement.html", request, account=account, meta=meta,
                       ledger=ledger, verified=verified,
                       pdf_rel=_pdf_rel(slug, sid),
-                      prov_pages=_prov_pages(ledger, provenance),
-                      llm_model=os.environ.get(
-                          "STATEMENTLEDGER_LLM_MODEL", ""))
+                      prov_pages=prov_pages,
+                      llm_model=llm_model)
 
     @app.get("/accounts/{slug}/statements/{sid}/original.pdf")
     def original_pdf(slug: str, sid: str, request: Request):
@@ -595,8 +625,7 @@ def create_app(data_root: Path | None = None,
 
     @app.get("/registry.json")
     def registry_json():
-        return [{"key": row["key"], "description": row["description"]}
-                for row in _registry_rows()]
+        return JSONResponse(_registry_rows())
 
     # -- PDF pages + frames (overlay geometry, §9.3) --------------------------
 
@@ -691,13 +720,7 @@ def create_app(data_root: Path | None = None,
 
     @app.get("/runs", response_class=HTMLResponse)
     def runs_list(request: Request):
-        items = runs.list()
-        for run in items:  # human names + duration for the table
-            account = store.get_account(run["account_slug"])
-            run["display_name"] = (account or {}).get(
-                "display_name", run["account_slug"])
-            run["duration"] = _duration(run.get("created_at"),
-                                        run.get("ended_at"))
+        items = _enriched_runs(runs.list())
         if wants_json(request):
             return JSONResponse(items)
         return render("runs.html", request, runs=items)
@@ -708,9 +731,11 @@ def create_app(data_root: Path | None = None,
             run = runs.get(run_id)
         except FileNotFoundError:
             raise HTTPException(404, f"no run {run_id!r}")
-        if wants_json(request):
-            return JSONResponse(run)
         account = store.get_account(run["account_slug"])
+        run["display_name"] = (account or {}).get(
+            "display_name", run["account_slug"])
+        run["duration"] = _duration(run.get("created_at"),
+                                    run.get("ended_at"))
         first_sid = run["statement_ids"][0] if run["statement_ids"] else None
         page_total = 0
         model = ""
@@ -723,6 +748,11 @@ def create_app(data_root: Path | None = None,
                 page_total = pages.page_count(pdf, store.root / "cache")
             except Exception:  # noqa: BLE001 - overlay degrades without pages
                 page_total = 0
+        run["sid"] = first_sid
+        run["pages"] = page_total
+        run["model"] = model
+        if wants_json(request):
+            return JSONResponse(run)
         config = {"id": run["id"], "slug": run["account_slug"],
                   "sid": first_sid, "pages": page_total}
         return render("run.html", request, run=run, account=account,
@@ -797,11 +827,38 @@ def create_app(data_root: Path | None = None,
 
     # -- account page: active + recent runs -----------------------------------
 
+    def _enriched_runs(items: list[dict]) -> list[dict]:
+        """Human names + duration for tables (shared by HTML and JSON)."""
+        for run in items:
+            account = store.get_account(run["account_slug"])
+            run["display_name"] = (account or {}).get(
+                "display_name", run["account_slug"])
+            run["duration"] = _duration(run.get("created_at"),
+                                        run.get("ended_at"))
+        return items
+
     def _account_runs(slug: str) -> list[dict]:
         return [run for run in runs.list()
                 if run["account_slug"] == slug][:5]
 
     app.mount("/static", StaticFiles(directory=here / "static"), name="static")
+
+    # -- React SPA (web/frontend, built with `npm run build`) ------------------
+    # Served at /app alongside the Jinja UI during migration; history fallback
+    # returns index.html so deep links (/app/runs/x) resolve client-side.
+    dist = here / "frontend" / "dist"
+
+    if (dist / "index.html").exists():
+
+        @app.get("/app", include_in_schema=False)
+        @app.get("/app/{rest:path}", include_in_schema=False)
+        def spa(rest: str = ""):
+            candidate = (dist / rest).resolve()
+            if (rest and candidate.is_relative_to(dist)
+                    and candidate.is_file()):
+                return FileResponse(candidate)
+            return FileResponse(dist / "index.html")
+
     return app
 
 

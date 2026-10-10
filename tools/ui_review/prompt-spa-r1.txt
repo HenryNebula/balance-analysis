@@ -1,0 +1,27 @@
+You are reviewing screenshots of a REBUILT web UI (fresh eyes — you have never seen this app).
+
+CONTEXT: statementledger is a local, single-user tool that turns bank-statement PDFs into arithmetically verified ledgers. A per-bank "parser" registry does the parsing; when no parser exists, an LLM "distill" run drafts one (live-streamed). The UI was just rewritten from server-rendered Jinja+htmx to React + shadcn/ui (neutral/zinc theme, Geist font). Target feel: a precise, calm financial tool — think Linear/Stripe-adjacent, not a flashy dashboard. Currency amounts must be legible and aligned; statuses must be instantly color-readable (green=verified, red=hard failure, amber=needs attention, blue=in flight).
+
+You may ONLY read files (no shell). Read each screenshot listed below (absolute paths, all PNG, 1600x1000):
+
+01 /home/henryhuang/.claude/jobs/25fa58b5/tmp/spa-shots/01-accounts-empty.png — accounts page, empty state
+02 /home/henryhuang/.claude/jobs/25fa58b5/tmp/spa-shots/02-account-empty.png — account page, no statements
+03 /home/henryhuang/.claude/jobs/25fa58b5/tmp/spa-shots/03-account-parsed.png — account page after a parsed upload
+04 /home/henryhuang/.claude/jobs/25fa58b5/tmp/spa-shots/04-statement.png — statement detail: reconciled ledger + PDF
+05 /home/henryhuang/.claude/jobs/25fa58b5/tmp/spa-shots/05-failed-pinned.png — failed upload card (wrong pinned parser)
+06 /home/henryhuang/.claude/jobs/25fa58b5/tmp/spa-shots/06-mystery-parsed.png — detection-mode account after parse
+07 /home/henryhuang/.claude/jobs/25fa58b5/tmp/spa-shots/07-run-live.png — distill run view, LIVE: PDF + amber selection band, trajectory timeline, code pane
+08 /home/henryhuang/.claude/jobs/25fa58b5/tmp/spa-shots/08-run-trace.png — run view, trace pane showing live output tail
+09 /home/henryhuang/.claude/jobs/25fa58b5/tmp/spa-shots/09-run-scrubbed.png — run view after clicking an earlier round (follow unpinned)
+10 /home/henryhuang/.claude/jobs/25fa58b5/tmp/spa-shots/10-run-cancelled.png — run view after cancel
+11 /home/henryhuang/.claude/jobs/25fa58b5/tmp/spa-shots/11-registry.png — parser registry table
+12 /home/henryhuang/.claude/jobs/25fa58b5/tmp/spa-shots/12-runs.png — distill runs list
+
+Read every one, then give:
+1. NUMBERED FINDINGS, each with: severity (blocker / major / minor / nit), which screen (by number), one-sentence defect, and (if layout) what misaligns. Judge as a picky designer would: alignment, spacing rhythm, typographic hierarchy, color semantics, dead space, contrast, information density, anything that reads as broken, cluttered, or "AI slop".
+2. An explicit VERDICT from this ladder:
+   - GA: NO — blockers exist; the UI misleads, obscures, or reads as broken.
+   - ACCEPTABLE — usable; named residuals remain.
+   - GA: YES — nothing remaining.
+
+Be specific and honest; do not invent problems that require scrolling or interactions the stills cannot show. End with the verdict line "VERDICT: <...>".

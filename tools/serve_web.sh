@@ -9,5 +9,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export STMTLEDGER_WEB_DATA="${STMTLEDGER_WEB_DATA:-$HOME/.local/share/statementledger}"
+
+# Build the React SPA (served at /app) if its bundle is missing. The Jinja UI
+# at / works regardless, so a node-less machine only loses /app.
+if [ ! -f web/frontend/dist/index.html ] && command -v npm >/dev/null 2>&1; then
+  (cd web/frontend && npm ci && npm run build)
+fi
+
 exec uv run --group web uvicorn web.app:app \
   --host "${HOST:-127.0.0.1}" --port "${PORT:-8765}"

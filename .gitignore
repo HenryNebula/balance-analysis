@@ -35,5 +35,5 @@ data/
 # Build artifacts
 dist/
 
-# ui-review tour harness (dev-only)
-tools/ui_review/node_modules/
+# node (ui-review tour harness, web/frontend SPA — dev-only)
+node_modules/

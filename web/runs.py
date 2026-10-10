@@ -92,7 +92,11 @@ class RunManager:
         return self._read(run_id)
 
     def list(self) -> list[dict]:
-        runs = [self._read(run_id.name) for run_id in self.runs_root.iterdir()
+        try:
+            run_dirs = list(self.runs_root.iterdir())
+        except FileNotFoundError:  # runs/ vanished under a live server
+            return []
+        runs = [self._read(run_id.name) for run_id in run_dirs
                 if (run_id / "run.json").exists()]
         order = {"running": 0, "cancelling": 0, "converged": 1, "failed": 1,
                  "cancelled": 1, "orphaned": 1}

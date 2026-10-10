@@ -52,7 +52,7 @@ def test_index_empty(client):
 
 def test_create_account(client, tmp_path):
     response = create(client, "Blue Lantern Savings")
-    assert response.status_code in (200, 303)
+    assert response.status_code in (200, 201, 303)
     account_file = (tmp_path / "data" / "accounts" / "blue-lantern-savings"
                     / "account.json")
     account = json.loads(account_file.read_text())
@@ -62,7 +62,7 @@ def test_create_account(client, tmp_path):
 
 
 def test_create_account_duplicate_slug(client):
-    assert create(client, "Blue Lantern Savings").status_code in (200, 303)
+    assert create(client, "Blue Lantern Savings").status_code in (200, 201, 303)
     assert create(client, "Blue Lantern Savings").status_code == 409
 
 
@@ -249,6 +249,7 @@ def test_registry(client):
     data = client.get("/registry.json").json()
     keys = {row["key"]: row for row in data}
     assert BLUE_KEY in keys and keys[BLUE_KEY]["description"]
+    assert keys[BLUE_KEY]["statements"] == 1  # usage counts for the SPA
     import statementledger as sl
     assert set(keys) == set(sl.keys())  # every module, docstring or not
     page = client.get("/registry")
@@ -737,3 +738,60 @@ def test_prov_pages_geometry():
     assert txn_band["left"] == min(item[1] for item in lines[4]["items"]) * 2
     assert _prov_pages(ledger, None) == []
     assert _prov_pages({"transactions": []}, frames) == []
+
+
+# --- SPA API: JSON content-negotiation branches --------------------------------
+
+
+def test_spa_json_branches(client):
+    # index → compact account rows
+    assert client.get("/", headers=JSON).json() == {"accounts": []}
+    create(client, "Blue Lantern Savings", key=BLUE_KEY)
+    upload(client, "blue-lantern-savings", BLUE)
+    rows = client.get("/", headers=JSON).json()["accounts"]
+    assert rows[0]["account"]["slug"] == "blue-lantern-savings"
+    assert rows[0]["total"] == 1 and rows[0]["parsed"] == 1
+    assert rows[0]["latest"]["summary"]["transactions"] == 14
+
+    # account detail → metas/chain/warnings/runs/model
+    detail = client.get("/accounts/blue-lantern-savings", headers=JSON).json()
+    assert detail["account"]["registry_key"] == BLUE_KEY
+    assert len(detail["metas"]) == 1
+    assert "chain" in detail and "warnings" in detail and "runs" in detail
+
+    # create via JSON → 201 + account body
+    made = create(client, "Another Bank")
+    assert made.status_code == 201
+    assert made.json()["slug"] == "another-bank"
+
+    # set key via JSON → account body
+    repin = client.post("/accounts/another-bank/key",
+                        data={"registry_key": COPPER_KEY}, headers=JSON)
+    assert repin.status_code == 200
+    assert repin.json()["registry_key"] == COPPER_KEY
+
+
+def test_spa_statement_and_run_json(run_client):
+    create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
+    sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
+    detail = run_client.get(
+        f"/accounts/blue-lantern-savings/statements/{sid}",
+        headers=JSON).json()
+    assert detail["meta"]["id"] == sid
+    assert detail["ledger"] is None  # wrong pin: failed, nothing recorded
+    assert detail["verified"] is None
+
+    run_id = _launch(run_client, "blue-lantern-savings", [sid]).json()["run_id"]
+    _wait_terminal(run_client, run_id)
+    body = run_client.get(f"/runs/{run_id}", headers=JSON).json()
+    assert body["display_name"] == "Blue Lantern Savings"
+    assert body["sid"] == sid and body["pages"] >= 1
+    assert body["status"] == "converged"
+    # parsed statement: verified flag; the demo parser doesn't adopt the
+    # provenance convention (txn["line"]/_anchors), so the overlay degrades
+    # to an empty list — distilled parsers that do adopt it get geometry
+    parsed = run_client.get(
+        f"/accounts/blue-lantern-savings/statements/{sid}",
+        headers=JSON).json()
+    assert parsed["verified"] is True
+    assert parsed["prov_pages"] == []
