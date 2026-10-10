@@ -55,6 +55,51 @@ def test_grep_tool_returns_hits_json(tmp_path):
     assert any("Transactions stop" in text for _i, text in payload["hits"])
 
 
+def test_grep_is_regex_by_default_with_zero_hit_hint(tmp_path):
+    ctx = make_ctx(tmp_path)
+    # alternation works with no regex flag — the grep CLI convention
+    result = agent._tool_grep(ctx, {"pattern": "stop|balance"})
+    assert json.loads(result)["count"] >= 2
+    # substring opt-out, zero hits, metachars present -> the mode hint
+    literal = agent._tool_grep(ctx, {"pattern": "stop|balance",
+                                     "regex": False})
+    assert '"count": 0' in literal
+    assert 'drop "regex": false' in literal
+    # zero hits in regex mode with metachars -> the substring hint
+    empty = agent._tool_grep(ctx, {"pattern": "nothere|ornothere"})
+    assert 'regex": false' in empty
+
+
+def test_duplicate_call_gets_a_note_and_results_are_logged(tmp_path):
+    ctx_frames = copper_frames()
+    (tmp_path / "frames.json").write_text(json.dumps(ctx_frames))
+    script = [
+        call("grep", {"pattern": "stop"}, "c1"),
+        call("grep", {"pattern": "stop"}, "c2"),   # identical repeat
+        call("write", {"content": PARSER.read_text()}, "c3"),
+        call("run", {}, "c4"),
+    ]
+    state = {"i": 0}
+    seen_tools: list[str] = []
+
+    def fake_chat(messages, tools):
+        seen_tools.extend(m["content"] for m in messages if m["role"] == "tool")
+        reply = script[state["i"]]
+        state["i"] += 1
+        return reply
+
+    trace = agent.Trace(tmp_path)
+    artifact, verified, _ = agent.agent_loop(
+        [Path("fixture.pdf")], tmp_path, 10, trace, frames=ctx_frames,
+        chat=fake_chat)
+    trace.close()
+    assert verified
+    assert any("identical grep call was already made (turn 1)" in c
+               for c in seen_tools)
+    log = (tmp_path / "trace.log").read_text()
+    assert "tool result: grep" in log and "tool result: run" in log
+
+
 def test_render_tool_returns_wall(tmp_path):
     ctx = make_ctx(tmp_path)
     result = agent._tool_render(ctx, {"start": 0, "n": 5})

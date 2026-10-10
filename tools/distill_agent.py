@@ -544,12 +544,13 @@ TOOLS = [
                  "n": {"type": "integer", "description": "line count (default 40, max 120)"},
                  "width": {"type": "integer", "description": "wall width in chars (default 110)"},
              }, ["start"]),
-    _schema("grep", "Which lines hold a term (case-insensitive; regex "
-             "optional). The way to find labels and stop words before "
-             "guessing them.", {
+    _schema("grep", "Which lines hold a pattern — case-insensitive REGEX "
+             "by default (like the grep CLI); \"regex\": false for a "
+             "literal substring. The way to find labels and stop words "
+             "before guessing them.", {
                  "stmt": {"type": "integer"},
                  "pattern": {"type": "string"},
-                 "regex": {"type": "boolean", "description": "treat pattern as a case-insensitive regex"},
+                 "regex": {"type": "boolean", "description": "default true: case-insensitive regex; false: literal substring"},
                  "context": {"type": "integer", "description": "neighbor lines to include (max 3)"},
              }, ["pattern"]),
     _schema("table", "The ledger grid: (columns, rows) with wrapped "
@@ -613,7 +614,8 @@ def _tool_grep(ctx: Ctx, args: dict) -> str:
         return error
     pattern = str(args.get("pattern", ""))
     context = max(0, min(int(args.get("context", 0) or 0), 3))
-    if args.get("regex"):
+    regex = args.get("regex", True)  # regex by default, like every grep
+    if regex:
         try:
             matcher = re.compile(pattern, re.I).search
         except re.error as bad:
@@ -631,8 +633,18 @@ def _tool_grep(ctx: Ctx, args: dict) -> str:
             if shown and shown[-1][0] == i:
                 continue
             shown.append([i, pl.line_text(lines[i])[:160]])
-    return json.dumps({"hits": shown, "count": len(hits),
-                       "truncated": len(hits) > 40}, default=str)
+    payload = {"hits": shown, "count": len(hits),
+               "truncated": len(hits) > 40}
+    result = json.dumps(payload, default=str)
+    if not hits and re.search(r"[|*+?()\[\]{}^$\\]", pattern):
+        mode = ("literal substring (regex: false)"
+                if not regex else "regex")
+        result += (f"\n0 matches in {mode} mode — the pattern contains "
+                   "regex operators; "
+                   + ("pass \"regex\": false for a literal substring search"
+                      if regex else
+                      "the default is regex mode (drop \"regex\": false)"))
+    return result
 
 
 def _tool_render(ctx: Ctx, args: dict) -> str:
@@ -793,10 +805,27 @@ def _tool_run(ctx: Ctx) -> tuple[str, str]:
     return payload + note, "run"
 
 
+def call_key(name: str, arguments: str) -> str | None:
+    """Canonical (tool, args) identity for duplicate detection; None when
+    the arguments don't parse (those get their own error feedback)."""
+    try:
+        return name + " " + json.dumps(json.loads(arguments), sort_keys=True)
+    except (ValueError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def duplicate_note(name: str, first_turn: int) -> str:
+    return (
+        f"NOTE: identical {name} call was already made (turn {first_turn}) "
+        "— the result is the same. Vary the arguments or take a different "
+        "action (write the parser, run it)."
+    )
+
+
 def dispatch(name: str, arguments: str, ctx: Ctx) -> tuple[str, str]:
     """Execute one tool call; returns (result text, kind) where kind is
     look/code/run. Never raises — failures are ERROR: strings the model
-    reads."""
+    reads. The result is logged to the trace beside its call."""
     try:
         args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments or {})
         if not isinstance(args, dict):
@@ -806,22 +835,25 @@ def dispatch(name: str, arguments: str, ctx: Ctx) -> tuple[str, str]:
                 "tool call"), "look"
     ctx.trace.log(f"tool call: {name}", json.dumps(args, default=str)[:2000])
     if name == "grep":
-        return _tool_grep(ctx, args), "look"
-    if name == "render":
-        return _tool_render(ctx, args), "look"
-    if name == "table":
-        return _tool_table(ctx, args), "look"
-    if name == "python":
-        return _tool_python(ctx, args), "look"
-    if name == "read":
-        return _tool_read(ctx), "look"
-    if name == "write":
-        return _tool_write(ctx, args), "code"
-    if name == "edit":
-        return _tool_edit(ctx, args), "code"
-    if name == "run":
-        return _tool_run(ctx)
-    return f"ERROR: unknown tool {name!r} (schemas are attached)", "look"
+        result, kind = _tool_grep(ctx, args), "look"
+    elif name == "render":
+        result, kind = _tool_render(ctx, args), "look"
+    elif name == "table":
+        result, kind = _tool_table(ctx, args), "look"
+    elif name == "python":
+        result, kind = _tool_python(ctx, args), "look"
+    elif name == "read":
+        result, kind = _tool_read(ctx), "look"
+    elif name == "write":
+        result, kind = _tool_write(ctx, args), "code"
+    elif name == "edit":
+        result, kind = _tool_edit(ctx, args), "code"
+    elif name == "run":
+        result, kind = _tool_run(ctx)
+    else:
+        return f"ERROR: unknown tool {name!r} (schemas are attached)", "look"
+    ctx.trace.log(f"tool result: {name}", result[:2000])
+    return result, kind
 
 
 # --- The loop ----------------------------------------------------------------------
@@ -881,11 +913,13 @@ def agent_loop(
     repair_streak = 0
     crash_streak = 0
     look_streak = 0
+    seen_calls: dict[str, int] = {}  # duplicates counted since last elision
 
     for turn in range(1, turns + 1):
         saved = elide_middle(messages, threshold=compact_chars)
         if saved > 0:
             trace.log(f"turn {turn} context elided", f"{saved} chars saved")
+            seen_calls.clear()  # post-elision repeats re-fetch lost output
         try:
             raw = chat(messages, TOOLS)
         except RuntimeError as error:
@@ -913,8 +947,20 @@ def agent_loop(
         last_tool: dict | None = None
         for call in calls:
             function = call.get("function", {})
-            result, kind = dispatch(function.get("name", ""),
-                                    function.get("arguments", "{}"), ctx)
+            tool_name = function.get("name", "")
+            arguments = function.get("arguments", "{}")
+            note = None
+            key = call_key(tool_name, arguments)
+            if key is not None:
+                if key in seen_calls:
+                    note = duplicate_note(tool_name, seen_calls[key])
+                else:
+                    seen_calls[key] = turn
+            result, kind = dispatch(tool_name, arguments, ctx)
+            if note:
+                result += "\n\n" + note
+                trace.line(f"turn {turn}: duplicate {tool_name} call "
+                           f"(first at turn {seen_calls[key]})")
             kinds.append(kind)
             entry = {"role": "tool", "tool_call_id": call["id"], "content": result}
             messages.append(entry)

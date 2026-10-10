@@ -73,8 +73,9 @@ The tool schemas are attached to every request. Doctrine:
 
 - THE GRID IS SOLVED — call table; never rebuild column geometry by hand.
   Pass stop_terms (READ them from the statement's end first).
-- grep finds where things are printed; render shows a region as the page
-  prints it. Explore by section and location before writing code.
+- grep finds where things are printed (regex by default, like the grep
+  CLI); render shows a region as the page prints it. Explore by section
+  and location before writing code.
 - parse_amount returns None for "no money here" — never zero.
 - python runs ad-hoc code in a sandbox (import statementledger as pl;
   pl.load_frames() reads the statements) — use it when the typed tools
