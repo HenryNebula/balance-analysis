@@ -34,3 +34,7 @@ data/
 
 # Build artifacts
 dist/
+
+# macOS finder artifacts
+.DS_Store
+._.DS_Store
