@@ -152,6 +152,46 @@ Verdict: **GA: YES** — loop stopped after 5 rounds.
   test (re-render == tour baseline; requires pdftoppm). Tests skip
   where the local corpus (data/, © TemplateLab derivatives) is absent.
 
+## Round 6 — presentation variations (18 pages; full 2027-01 + 2027-04)
+
+Added realism variations, each stressing a different parser assumption:
+1-3-line narrations (new 3-line pool), CHQ.NO populated on cheque/branch
+rows, inactive money column blank instead of "0.00" on some rows, ~10%
+of rows printing no balance (truth keeps the computed running balance).
+Manifest now records per-month variation counts; a new no-clipping
+tripwire test asserts every narration word survives into the PDF text
+layer. Findings → outcome:
+
+1. 3-line narration rows clipped at the bottom (blocker) — **fix, two
+   parts**: (a) the template pins row heights per line count (268 for
+   1-line, 450 for its 2-line rows) and extrapolating the 450 rounding
+   (182/line) under-sized 3-liners by ~2pt — line 3's glyphs crossed the
+   next row's top; heights now use the true 12pt line pitch (240tw)
+   beyond the template's own 1/2-line values. (b) The template reserves
+   no footer band: content runs to y=700pt while the footer rule sits
+   absolutely at y=696.55 — bottom rows printed through the rule; bottom
+   margin widened to 100pt so content clears it. Transaction rows also
+   get cantSplit (a printed row never breaks across pages).
+2. Sparse-cell alignment — pass.
+3. "Tail orphan / Page 4 of 5" (nit) — **disproved**: the scan verifies
+   footers ("Page N of M") and tail-on-table-page for every statement;
+   the reviewer's page numbering didn't match the documents.
+
+Note: the round-6 clipping was invisible to text-layer checks (clipped
+glyphs still extract) — the agy review caught it, and the objective
+scan's ink-level rule test then confirmed it. Eyes and geometry each
+cover the other's blind spots.
+
+Verdict: GA: NO.
+
+## Round 7 — same tour after height/footer fixes
+
+All checks PASS: 2-, 3-, and 4-line narrations fully rendered, footer
+band clear on every page, sparse cells aligned.
+
+Verdict: **GA: YES** — second convergence (7 rounds total across the
+corpus's two configurations).
+
 Keep-list additions from rounds 2-4: END OF STATEMENT two-line wrap and
 the double space in the old reward label are the template's own;
 LibreOffice renders with pinned fonts (Courier New → Liberation Mono

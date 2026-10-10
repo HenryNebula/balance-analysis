@@ -83,6 +83,32 @@ def test_manifest_matches_truth_counts():
         assert len(truth(row)["transactions"]) == row["transactions"]
 
 
+def test_variation_scenarios_present():
+    """The corpus exists to stress generalization: across the year there
+    must be 3-line narrations, populated CHQ.NO cells, blank inactive
+    money cells, and unprinted balances (with truth still exact)."""
+    v = [sum(r["variation"][k] for r in manifest()) for k in
+         ("threeline_txns", "chq_filled", "blank_money_cells",
+          "unprinted_balances")]
+    assert v[0] >= 1, "no 3-line narrations in corpus"
+    assert v[1] >= 5, "CHQ.NO almost never populated"
+    assert v[2] >= 5, "inactive money column never blank"
+    assert v[3] >= 5, "no unprinted balances"
+
+
+@pytest.mark.parametrize("row", manifest(), ids=lambda r: r["month"])
+def test_every_narration_line_survives_rendering(row):
+    """No clipping: each word of every narration must appear in the PDF's
+    text layer (a clipped 3rd line in an exact-height row vanishes)."""
+    doc = _page_text(CORPUS / row["file"], 1)
+    for page in range(2, row["pages"] + 1):
+        doc += _page_text(CORPUS / row["file"], page)
+    wordset = set(doc.split())
+    for txn in truth(row)["transactions"]:
+        missing = [w for w in txn["description"].split() if w not in wordset]
+        assert not missing, (row["month"], txn["description"], missing)
+
+
 def _page_text(pdf: Path, page: int) -> str:
     out = subprocess.run(["pdftotext", "-f", str(page), "-l", str(page),
                           str(pdf), "-"], capture_output=True, text=True,

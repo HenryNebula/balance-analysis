@@ -90,6 +90,22 @@ LONG_CREDIT = [
     "D/4305882700913 CHEQUE DEP/000518 TELLER 0344 BRANCH",
     "NIP INWARD FROM/OSPREY FREIGHT REF:889031122045",
 ]
+# 3-liners (66-95 chars): narration + instrument ref + settlement detail,
+# the way business-account rows actually print
+LONG3_DEBIT = [
+    "NIP OUTWARD TO/OSPREY FREIGHT LTD REF:889031122045 SETTLED VIA "
+    "INSTANT PAYMENT GATEWAY SAME DAY",
+    "D/4305882700913 PRCR/CARD POS QUARRYMEN BUILDERS YARD KINGSPORT "
+    "EAST AUTH CODE 0442",
+    "EFT/CBL REMIT TO/HELVETIA PARTS GMBH GENEVA INV-2291 LESS BANK "
+    "CHARGES 12.50",
+]
+LONG3_CREDIT = [
+    "NIP INWARD FROM/SEXTANT FOODS LTD REF:771204660023118 COVER "
+    "INVOICE 4471 SEXTANT FOODS",
+    "D/4305882700913 CHEQUE DEP/000518 TELLER 0344 BRANCH KINGSPORT "
+    "CLEARING 2 BUSINESS DAYS",
+]
 CHQ_ROWS = {"CHQ PAID/000451"}  # narratives that also carry a CHQ.NO
 
 TNC_HEADING = "TERMS AND CONDITIONS"
@@ -146,7 +162,13 @@ def split_lines(text: str, width: int = 32) -> list[str]:
 
 def month_ledger(rng: random.Random, year: int, month: int, opening: float,
                  n_txns: int) -> tuple[list[dict], float]:
-    """Synthesize one month: txns with printed rows, chained running balance."""
+    """Synthesize one month: txns with printed rows, chained running balance.
+
+    Presentation variation is deliberate (each breaks a naive parser
+    assumption): narratives of 1-3 printed lines; CHQ.NO populated on
+    cheque/branch rows and blank otherwise; the inactive money column
+    blank rather than '0.00' on some rows; ~10% of rows omit the printed
+    balance (truth still records the computed running balance)."""
     days_in_month = calendar.monthrange(year, month)[1]
     txns, running = [], opening
     day = rng.randint(1, 3)
@@ -157,16 +179,27 @@ def month_ledger(rng: random.Random, year: int, month: int, opening: float,
         amount = round(rng.uniform(18, 9400) if debit else rng.uniform(90, 11800), 2)
         signed = -amount if debit else amount
         running = round(running + signed, 2)
-        if rng.random() < 0.22:
+        r = rng.random()
+        if r < 0.10:                       # 3-line narration
+            narrative = rng.choice(LONG3_DEBIT if debit else LONG3_CREDIT)
+        elif r < 0.30:                     # 2-line narration
             narrative = rng.choice(LONG_DEBIT if debit else LONG_CREDIT)
         else:
             narrative = rng.choice(SHORT_DEBIT if debit else SHORT_CREDIT)
+        # cheque-linked and branch rows carry an instrument number
+        chq = ""
+        if "CHQ" in narrative or "BRANCH TELLER" in narrative:
+            if rng.random() < 0.8:
+                chq = f"{rng.randint(0, 999999):06d}"
+        # inactive money column: usually a printed 0.00, sometimes blank
+        blank_zero = rng.random() < 0.15
         txns.append({
             "date": f"{day:02d}-{MONTHS[month - 1]}-{year}",
             "lines": split_lines(narrative),
-            "chq": "000" + str(rng.randint(100, 999)) if narrative in CHQ_ROWS else "",
-            "withdraw": f"{amount:,.2f}" if debit else "0.00",
-            "deposit": "0.00" if debit else f"{amount:,.2f}",
+            "chq": chq,
+            "withdraw": f"{amount:,.2f}" if debit else ("" if blank_zero else "0.00"),
+            "deposit": ("" if blank_zero else "0.00") if debit else f"{amount:,.2f}",
+            "print_balance": rng.random() > 0.10,
             "amount": signed,
             "balance": running,
         })
@@ -320,6 +353,19 @@ def fix_footer_numpages(doc) -> None:
 # --- template surgery helpers ---------------------------------------------------
 
 
+def reserve_footer_band(doc) -> None:
+    """The template's footer rule is an absolutely-positioned line at
+    y=696.55pt, but the bottom margin only stops content at 700pt — no
+    footer band reserved, so rows landing at a page's bottom print
+    through the rule. Widen the bottom margin until content clears it
+    (the template's own table never reached that low, which is why the
+    mis-tuning was invisible)."""
+    for sect in doc.element.body.findall(f".//{W}sectPr"):
+        mar = sect.find(f"{W}pgMar")
+        if mar is not None and int(mar.get(f"{W}bottom", "0")) < 2000:
+            mar.set(f"{W}bottom", "2000")   # 100pt: content ends 692 < 696.55
+
+
 def relax_tail_page_break(doc) -> None:
     """The template parks the reward-points tail behind a section break
     with NO w:type (absent type defaults to nextPage) — meant for a
@@ -445,6 +491,7 @@ def fill_44769(template: Path, out: Path, ctx: dict) -> None:
     doc = Document(template)
     body_ps = doc.paragraphs
     fix_footer_numpages(doc)
+    reserve_footer_band(doc)
     relax_tail_page_break(doc)
 
     def by_text(prefix: str) -> list:
@@ -512,9 +559,24 @@ def fill_44769(template: Path, out: Path, ctx: dict) -> None:
 
     for txn in ctx["txns"]:
         tr = deepcopy(donor_txn)
+        # the template pins row height to the narration's line count:
+        # exact 268 for 1-line rows, 450 for its 2-line rows. Beyond that
+        # the true per-line cost is the 12pt line pitch (240 twips) —
+        # extrapolating the 450 rounding clipped 3rd lines by ~2pt
+        heights = {1: "268", 2: "450"}
+        n_lines = len(txn["lines"])
+        h = tr.find(f"{W}trPr/{W}trHeight")
+        h.set(f"{W}val", heights.get(n_lines, str(268 + 240 * (n_lines - 1))))
+        # a printed transaction row never splits across pages; without
+        # this, LO breaks a multi-line row at the page bottom (line 1
+        # crossing the footer rule, continuation orphaned on the next)
+        trpr = tr.find(f"{W}trPr")
+        if trpr.find(f"{W}cantSplit") is None:
+            trpr.append(trpr.makeelement(f"{W}cantSplit", {}))
         set_tr_text(tr, [txn["date"], txn["lines"][0], txn["chq"],
                          txn["withdraw"], txn["deposit"],
-                         f"{txn['balance']:,.2f}"])
+                         f"{txn['balance']:,.2f}" if txn["print_balance"]
+                         else ""])
         # long narratives continue on extra paragraphs inside the
         # PARTICULARS cell (the template's own wrapped-row style), never
         # as separate rows: a short continuation row landing right after
@@ -694,6 +756,20 @@ def main() -> None:
             "template": args.template, "transactions": len(txns),
             "pages": pages, "opening": opening, "closing": closing,
             "tail_fit_adjusted": n != n0,
+            "notes": ("presentation semantics: narration continues on "
+                      "date-less lines inside PARTICULARS; the inactive "
+                      "money column is sometimes blank; some rows print "
+                      "no balance — truth records the computed running "
+                      "balance for those"),
+            "variation": {
+                "multiline_txns": sum(len(t["lines"]) > 1 for t in txns),
+                "threeline_txns": sum(len(t["lines"]) > 2 for t in txns),
+                "chq_filled": sum(bool(t["chq"]) for t in txns),
+                "blank_money_cells": sum(
+                    (t["amount"] < 0 and t["deposit"] == "") or
+                    (t["amount"] > 0 and t["withdraw"] == "") for t in txns),
+                "unprinted_balances": sum(not t["print_balance"] for t in txns),
+            },
             "sha256": hashlib.sha256(pdf.read_bytes()).hexdigest(),
         })
         print(f"{stem}: {len(txns):3d} txns  {pages} pp  "

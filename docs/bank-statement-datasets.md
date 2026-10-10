@@ -215,10 +215,13 @@ git history: `benchmark: distill Bankstatemently parsers`).
 `tools/templates/gen_statements.py` fills the tl-44769 Word original
 (classic DATE/PARTICULARS/CHQ.NO/WITHDRAW/DEPOSIT/BALANCE layout) with a
 fictional bank's ledger: 12 chained months, varying lengths (30-81 txns,
-2-4 pp), wrapped narratives as date-less continuation lines, uniform
-T&C page, repeated table headers on continuation pages, byte-deterministic
-PDFs (sha256-pinned in manifest.jsonl) and exact .truth.json ground truth
-per month — distill-ready inputs with known ledgers. Layout consistency is
+2-4 pp), 1-4-line narrations (date-less continuation lines), CHQ.NO
+filled on cheque/branch rows, sometimes-blank inactive money column,
+~10% of rows without a printed balance (truth keeps the computed value),
+uniform T&C page, repeated table headers on continuation pages,
+byte-deterministic PDFs (sha256-pinned in manifest.jsonl) and exact
+.truth.json ground truth per month — distill-ready inputs with known
+ledgers. Layout consistency is
 gated two ways: an objective scan (`tools/templates/layout_scan.py`) and
 a 5-round ui-review-loop that converged GA: YES
 (docs/template-statement-visual-review.md). Everything derived from the
