@@ -37,3 +37,7 @@ dist/
 
 # node (ui-review tour harness, web/frontend SPA — dev-only)
 node_modules/
+
+# macOS finder artifacts
+.DS_Store
+._.DS_Store

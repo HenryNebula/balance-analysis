@@ -210,6 +210,40 @@ git history: `benchmark: distill Bankstatemently parsers`).
   layouts yet — a distill to-do list), zero false positives from the
   existing registry.
 
+### data/gen — template-filled statements (GENERATED here, not downloaded)
+
+`tools/templates/gen_statements.py` fills Word-template originals with
+fictional ledgers — three corpora, one pipeline (byte-deterministic
+PDFs sha256-pinned in each manifest.jsonl, exact .truth.json per month,
+12 chained months each):
+
+- **tl-44769** (fictional "Meridian Trust Bank", ledger layout): varying
+  lengths (30-85 txns, 3-5 pp), 1-4-line narrations (date-less
+  continuation lines), CHQ.NO filled on cheque/branch rows,
+  sometimes-blank inactive money column, ~10% of rows without a printed
+  balance (truth keeps the computed value), uniform T&C page, repeated
+  table headers on continuation pages.
+- **tl-44773** (Chase-style checking; real letterhead, fictional data):
+  five tables that must agree (summary / deposits / checks /
+  withdrawals / daily ending balance) + fee counters; MM/DD year-less
+  dates (year in the header period), $ on first amount per section,
+  summary debits negative vs positive section totals, masked-style
+  check numbers, fixed 4-page sections with literal Page N of 4.
+- **tl-44745** (Chase Toronto billing invoice, landscape 6pp): invoice
+  ledger (previous due → payment → current charge → total due, chained),
+  absolutely-positioned activity grid whose subtotals sum exactly to
+  the invoice charge (the template's own numbers disagreed by 3.63).
+
+Registry behaviour worth knowing: the Chase-family parsers VERIFY the
+two Chase corpora but differ from ground truth in presentation
+semantics (see docs/template-statement-visual-review.md) — the
+arithmetic gate is necessary, not sufficient. Layout consistency is
+gated two ways: an objective scan (`tools/templates/layout_scan.py`) and
+a ui-review-loop per corpus (all three converged GA: YES — see
+docs/template-statement-visual-review.md)
+(docs/template-statement-visual-review.md). Everything derived from the
+© TemplateLab template stays in gitignored data/.
+
 ## Secondary — adjacent datasets (NOT statement documents)
 
 **Document-image datasets (images, no PDFs, need conversion for our pipeline):**
