@@ -174,6 +174,37 @@ def test_table_no_header_raises_with_hint():
         sl.table([line(0, 50, ("no columns here", 72, 200))])
 
 
+def test_table_merges_split_number_fragments():
+    # the extractor splits space-grouped numbers into separate items; the
+    # leading digit group must join its amount fragment BEFORE column
+    # binning or it lands in a neighboring column (bsb-005: -200.45 drift)
+    lines = [line(0, 40, ("Date", 72, 100), ("Description", 150, 220),
+                  ("Debit", 380, 420), ("Balance", 500, 545)),
+             line(0, 60, ("03 janv. 25", 72, 110), ("AMAZON.CA", 150, 210),
+                  ("1", 376, 382), ("200,45", 384, 410), ("$", 412, 416),
+                  ("9 408,58", 500, 545))]
+    _cols, rows = sl.table(lines)
+    assert rows[0]["Debit"] == "1 200,45 $"
+    assert sl.parse_amount(rows[0]["Debit"]) == 1200.45
+    assert rows[0]["Balance"] == "9 408,58"
+
+
+def test_table_never_merges_words_or_far_columns():
+    # "02" + "janv." is a date, not a split number; distant digit pairs are
+    # separate columns, not one value
+    lines = [line(0, 40, ("Date", 72, 100), ("Description", 150, 220),
+                  ("Amount", 380, 420)),
+             line(0, 60, ("02", 72, 84), ("janv. 25", 86, 120),
+                  ("coffee", 150, 210), ("1", 376, 382), ("200,45", 384, 410))]
+    _cols, rows = sl.table(lines)
+    assert rows[0]["Date"] == "02 janv. 25"  # word neighbor blocks the merge
+    assert rows[0]["Amount"] == "1 200,45"
+    far = [line(0, 40, ("Qty", 72, 100), ("Price", 380, 420)),
+           line(0, 60, ("2", 72, 80), ("150,00", 380, 410))]
+    _c, far_rows = sl.table(far, header=far[0])
+    assert far_rows[0]["Qty"] == "2" and far_rows[0]["Price"] == "150,00"
+
+
 # --- render_table ------------------------------------------------------------
 
 
@@ -201,8 +232,43 @@ def test_render_table_hides_empty_columns(capsys):
 # --- anchor_value ------------------------------------------------------------
 
 
+def test_anchor_value_split_label_finds_line_money():
+    # a multi-word label spread over items ("Solde" + "D'ouverture 1") never
+    # matches one item — the line-tail fallback picks the first grouped-money
+    # token after the term (a year never glues on: 4-digit runs don't match)
+    lines = [line(0, 50, ("Solde", 72, 100), ("D'ouverture 1", 102, 160),
+                  ("janvier 2025", 162, 220), ("10", 300, 312),
+                  ("750,00", 314, 340), ("$", 342, 348))]
+    assert sl.anchor_value(lines, "Solde D'ouverture") == "10 750,00 $"
+    assert sl.parse_amount(sl.anchor_value(lines, "Solde D'ouverture")) == 10750.0
+
+
 def test_anchor_value_beside_the_label():
     assert sl.anchor_value(statement_lines(), "Account No:") == "1234 5678"
+
+
+def test_anchor_value_reads_value_merged_into_the_label_item():
+    # the extractor merges close words into one item: label and value share
+    # a single [text, x1, x2] — the value is the text AFTER the term
+    lines = [line(0, 50, ("Account No: 1234 5678", 72, 220))]
+    assert sl.anchor_value(lines, "Account No:") == "1234 5678"
+
+
+def test_anchor_value_reads_value_on_the_line_below():
+    # some templates print the value under its label; the next line is the
+    # value unless it looks like another label
+    lines = [line(0, 50, ("Account No:", 72, 130)),
+             line(0, 60, ("1234 5678", 72, 130)),
+             line(0, 80, ("Currency:", 72, 130), ("SGD", 200, 230))]
+    assert sl.anchor_value(lines, "Account No:") == "1234 5678"
+    assert sl.anchor_value(lines, "Currency:") == "SGD"  # beside still wins
+
+
+def test_anchor_value_label_stack_does_not_eat_the_next_label():
+    lines = [line(0, 50, ("Account No:", 72, 130)),
+             line(0, 60, ("Currency:", 72, 130), ("SGD", 200, 230))]
+    with pytest.raises(ValueError, match="no value beside, after, or below"):
+        sl.anchor_value(lines, "Account No:")
 
 
 def test_anchor_value_index_picks_nth_match():
