@@ -174,6 +174,42 @@ statements remain the bank's/customer's — testing use only.
 - Why: worst-case-input stress (phone photos of passbooks, not statements) for
   any OCR/robustness experiment; low value for the pdfplumber path.
 
+## Adopted local corpora (in data/, gitignored — never committed)
+
+Two corpora are downloaded and in active use. Both carry a `metadata.jsonl`
+with sha256 pins next to the files; `uv run python tools/bsb_matrix.py <dir>`
+sweeps a corpus against the whole registry.
+
+### data/bsb — Bankstatemently benchmark (see shortlist #2)
+
+5 PDFs, sha256-pinned against upstream `metadata.jsonl`; expected
+transaction counts used as ground truth by the matrix. All five banks have
+distilled, verified registry parsers (see `docs/web-ui-design.md` context in
+git history: `benchmark: distill Bankstatemently parsers`).
+
+### data/templatelab — TemplateLab statement templates, converted to PDF
+
+- Source: https://templatelab.com/bank-statement/ (35 editable "bank
+  statement" templates; several mimic real banks: JPMorgan Chase x3 incl.
+  the Toronto branch, Guaranty Trust Bank NG, plus generic/blank templates,
+  reconciliation exercises, a 30-page investment report, and Excel statement
+  generators). Fictional data, no PII.
+- The live site is Cloudflare-gated for scripted clients, so the files were
+  taken from Wayback Machine captures (2019) of the page's
+  `?wpdmdl=<id>` download endpoints. Those captures turned out to be the
+  templates' **Word/Excel originals**, not the site's PDFs — they were
+  converted to PDF locally with headless LibreOffice. Each file's exact
+  provenance (wayback URL + origin format) is recorded per-file in
+  `data/templatelab/metadata.jsonl`.
+- License posture: templates are free to download but © TemplateLab — fine
+  for local parser testing, NOT redistributable; this is why the corpus
+  lives only in gitignored `data/` and this section records where it came
+  from. No ground-truth transaction counts (`transactionCount: null`), so
+  the matrix checks verification/false-positives only.
+- Current status: 17 statements, none verified (no parsers for these
+  layouts yet — a distill to-do list), zero false positives from the
+  existing registry.
+
 ## Secondary — adjacent datasets (NOT statement documents)
 
 **Document-image datasets (images, no PDFs, need conversion for our pipeline):**

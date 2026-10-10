@@ -1,14 +1,16 @@
-"""Verification matrix for the Bankstatemently benchmark corpus.
+"""Verification matrix for a downloaded statement corpus.
 
-For every statement in a downloaded corpus (default data/bsb/data — see
-docs/bank-statement-datasets.md) x every registered parser: does it verify?
-Then flag anything that is not a clean 1:1 mapping:
+For every statement in a corpus dir (default data/bsb/data — see
+docs/bank-statement-datasets.md; any dir with *.pdf + metadata.jsonl works)
+x every registered parser: does it verify? Then flag anything that is not a
+clean 1:1 mapping:
 
   - a statement with no verifier (distill it: tools/distill_harness.py)
   - a statement with >1 verifier (ambiguity: pin the account to one key)
   - a verifier whose transaction count != the corpus metadata's count
     (verified arithmetic over partial coverage — e.g. one account of a
-    multi-account PDF)
+    multi-account PDF; skipped when the metadata's transactionCount is null,
+    i.e. the corpus ships no ground truth)
 
     uv run python tools/bsb_matrix.py [corpus_dir]
 """
@@ -41,16 +43,18 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as tmp:
             statements = sl.frames_for([pdf], Path(tmp))["statements"]
 
-        row = {"challenges": m["challenges"], "expected_txns": m["transactionCount"],
+        expected = m.get("transactionCount")
+        row = {"challenges": m.get("challenges"), "expected_txns": expected,
                "verifiers": []}
         for key in key_names:
             if sl.evaluate(load_module(key).parse, statements)["verified"]:
-                stmt = load_module(key).parse(statements[0])
+                ledgers = sl.ledgers_of(load_module(key).parse(statements[0]))
+                n_txns = sum(len(ledger["transactions"]) for ledger in ledgers)
                 row["verifiers"].append({
-                    "key": key, "n_txns": len(stmt["transactions"]),
-                    "txns_match_meta": len(stmt["transactions"]) == m["transactionCount"],
-                    "bank": stmt["bank_name"], "account": stmt["account_number"],
-                    "opening": stmt["opening_balance"], "closing": stmt["closing_balance"],
+                    "key": key, "n_txns": n_txns,
+                    "txns_match_meta": None if expected is None else n_txns == expected,
+                    "banks": [ledger["bank_name"] for ledger in ledgers],
+                    "accounts": [ledger["account_number"] for ledger in ledgers],
                 })
         report[mid] = row
 
@@ -64,7 +68,7 @@ def main() -> int:
             flags.append(f'{mid}: {len(r["verifiers"])} verifiers '
                          f'({", ".join(v["key"] for v in r["verifiers"])})')
         for v in r["verifiers"]:
-            if not v["txns_match_meta"]:
+            if v["txns_match_meta"] is False:
                 flags.append(f'{mid}: {v["key"]} verified but '
                              f'{v["n_txns"]}/{r["expected_txns"]} txns (partial coverage?)')
     print("\n" + ("\n".join(flags) if flags else "clean 1:1 mapping, all txn counts match"))

@@ -32,31 +32,34 @@ import tempfile
 from pathlib import Path
 
 from statementledger.engine import (TOL, CANONICAL_FIELDS, VerificationError,
-                                    evaluate, hint_for, items, line_text,
+                                    anchor_value, evaluate, grep, hint_for,
+                                    items, ledgers_of, line_text,
                                     parse_amount, parse_date, reconcile,
-                                    reconcile_statement, show, validate)
+                                    reconcile_statement, regions, render,
+                                    render_table, table, validate)
 from statementledger.frames import frames_for, load_frames
 from statementledger.registry import keys, load_module
 
 __version__ = "0.1.0"
 
 __all__ = [
-    "parse", "keys",
+    "parse", "parse_all", "keys",
     # frames
     "frames_for", "load_frames",
     # engine
     "parse_amount", "parse_date", "reconcile", "reconcile_statement",
-    "validate", "evaluate", "hint_for", "line_text", "show", "items",
-    "VerificationError", "CANONICAL_FIELDS", "TOL",
+    "validate", "evaluate", "hint_for", "line_text", "items",
+    "render", "grep", "regions",                      # layout views
+    "table", "render_table", "anchor_value",          # ledger grid
+    "ledgers_of", "VerificationError", "CANONICAL_FIELDS", "TOL",
     "__version__",
 ]
 
 
-def parse(pdf: str, key: str | None = None) -> dict:
-    """Parse one PDF with a registered parser (all of them when key is None;
-    the first that verifies wins). Returns the canonical statement dict
-    (tagged with its "_key"), raising VerificationError when none
-    reconciles — that is the engine."""
+def _verified(pdf: str, key: str | None):
+    """(key, parse() result) of the first registered parser that verifies the
+    PDF — the shared engine of parse()/parse_all(). Raises VerificationError
+    naming every candidate's failure when none reconciles."""
     pdfs = [Path(pdf)]
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -68,9 +71,31 @@ def parse(pdf: str, key: str | None = None) -> dict:
         module = load_module(candidate)
         verdict = evaluate(module.parse, statements)
         if verdict["verified"]:
-            stmt = module.parse(statements[0])
-            stmt["_key"] = candidate
-            return stmt
+            return candidate, module.parse(statements[0])
         failures.extend(f"{candidate}: {r['error']}" for r in verdict["results"])
     raise VerificationError(
         f"no registered parser verified {Path(pdf).name}:\n" + "\n".join(failures))
+
+
+def parse(pdf: str, key: str | None = None):
+    """Parse one PDF with a registered parser (all of them when key is None;
+    the first that verifies wins). Returns the canonical statement dict —
+    or, when the bank's parser covers a multi-account PDF (several accounts,
+    each with its own balances), a LIST of dicts, one per account, each
+    verified (see parse_all for the always-a-list form). Every ledger is
+    tagged with its "_key"; VerificationError is raised when no parser
+    reconciles — that is the engine."""
+    key_, result = _verified(pdf, key)
+    for ledger in ledgers_of(result):
+        ledger["_key"] = key_
+    return result
+
+
+def parse_all(pdf: str, key: str | None = None) -> list[dict]:
+    """parse() normalized to a list: one ledger per account in the PDF (a
+    single-account statement gives a one-element list)."""
+    key_, result = _verified(pdf, key)
+    ledgers = ledgers_of(result)
+    for ledger in ledgers:
+        ledger["_key"] = key_
+    return ledgers

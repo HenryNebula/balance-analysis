@@ -10,13 +10,15 @@ not fails the gate no matter how plausible its output looks.
 A registry artifact is a Python module defining
 
     KEY = "us__bank__product__1"
-    def parse(frames) -> dict: ...   # pure; canonical statement dict
+    def parse(frames) -> dict | list[dict]: ...   # pure; canonical dict(s)
 
 frames is the extracted layout (see statementledger.frames): one statement
 dict {"name": str, "lines": [{"page", "y", "items": [[text, x1, x2], ...]},
 ...]}. parse() derives everything from it at runtime (no transcribed
 amounts/dates/descriptions), so a registered module parses FUTURE months of
-the same bank with zero LLM.
+the same bank with zero LLM. A PDF holding SEVERAL accounts (repeated table
+headers, each with its own account number and balances) gets a LIST of
+canonical dicts — one per account, each gated on its own arithmetic.
 
 stdlib only; runs both inside the distill sandbox and at reuse time.
 """
@@ -40,23 +42,76 @@ def line_text(line: dict) -> str:
     return " ".join(item[0] for item in line["items"])
 
 
-def show(lines: list[dict], n: int = 15, start: int = 0) -> None:
-    """Print lines[start:start+n] in layout-dump form, with line indices:
+def render(lines: list[dict], n: int = 40, start: int = 0,
+           width: int = 110) -> None:
+    """Print lines[start:start+n] as an x-preserving text wall (each page
+    scaled to `width` columns):
 
         [Page 0]
-        038 ["15 Jan",77,113] ["Transaction 29",149,229] ["1,122.33",282,329]
+        038 | Date   Description       Debit    Balance
+        039 | 01 Feb  STORE 482        112.33   9,844.21
 
-    Line indices are zero-based offsets into `lines` — the same indices you
-    slice with lines[a:b]. Probe the TOP (start=0) and the END
-    (start=len(lines)-n; the words that stop the table live there)."""
+    Indices match lines[a:b]. Money columns win collisions; long items clip
+    with "…". Positions are approximate — exact x is in lines[i]["items"]."""
+    page_right: dict[int, int] = {}
+    for line in lines:
+        for _text, _x1, x2 in line["items"]:
+            page_right[line["page"]] = max(page_right.get(line["page"], 0), x2)
     page = None
     for index in range(start, min(start + n, len(lines))):
         line = lines[index]
         if line["page"] != page:
             page = line["page"]
             print(f"[Page {page}]")
-        items = " ".join(f'["{t}",{x1},{x2}]' for t, x1, x2 in line["items"])
-        print(f"{index:03d} {items}")
+        scale = width / max(page_right.get(page, 0) or 600, 1)
+        buffer = [" "] * width
+        placed: list[int] = []  # start columns of items already placed
+        for text, x1, _x2 in reversed(line["items"]):
+            col = min(int(round(x1 * scale)), width - 1)
+            limit = min(placed) if placed else width  # nearest right neighbor
+            room = limit - col - 1  # one blank separator column
+            if room <= 0:
+                continue  # a rightward item (money wins) covers this span
+            shown = text if len(text) <= room else text[: room - 1] + "…"
+            buffer[col: col + len(shown)] = list(shown)
+            placed.append(col)
+        print(f"{index:03d} | " + "".join(buffer).rstrip())
+
+
+def grep(lines: list[dict], pattern: str, regex: bool = False,
+         context: int = 0) -> None:
+    """Print the lines whose text holds `pattern`, with indices:
+
+        grep(lines, "balance") ->
+            003: Opening balance: $25,000.00 CR
+            2 match(es)
+
+    Case-insensitive substring; regex=True for a re.search. context=k adds
+    k neighboring lines, "--" between groups. Probe tool — parse() wants
+    anchor_value."""
+    if regex:
+        def matches(text: str) -> bool:
+            return re.search(pattern, text, re.I) is not None
+    else:
+        needle = pattern.lower()
+
+        def matches(text: str) -> bool:
+            return needle in text.lower()
+    hits = [i for i, line in enumerate(lines) if matches(line_text(line))]
+    if not hits:
+        print(f"0 match(es) for {pattern!r}")
+        return
+    wanted: set[int] = set()
+    for hit in hits:
+        wanted.update(range(max(0, hit - context),
+                            min(len(lines), hit + context + 1)))
+    previous = None
+    for index in sorted(wanted):
+        if previous is not None and index > previous + 1:
+            print("--")
+        print(f"{index:03d}: {line_text(lines[index])}")
+        previous = index
+    print(f"{len(hits)} match(es)")
 
 
 def items(frames: dict) -> list[dict]:
@@ -99,6 +154,9 @@ def parse_amount(token: str | list, strict_grouping: bool = False) -> float | No
         parse_amount("500.00 DR")     -> -500.0     (DR negative, CR positive)
         parse_amount("(45.00)")       -> -45.0      (parenthesised negative)
         parse_amount("1,234.56-")     -> -1234.56   (trailing minus)
+        parse_amount("10 750,00 $")   -> 10750.0    (European: space-grouped
+                                                     thousands, comma decimal)
+        parse_amount("- 6 886,21 $")  -> -6886.21
         parse_amount("3978.53", strict_grouping=True) -> None  (ungrouped)
         parse_amount("")              -> None       (blank/"—"/"Nil")
     None is NOT zero — it means "no readable money here". Rows whose credit
@@ -116,6 +174,17 @@ def parse_amount(token: str | list, strict_grouping: bool = False) -> float | No
     text = re.sub(r"(?i)(cr|dr)$", "", text).strip()
     negative = negative or text.endswith("-") or text.startswith("-")
     text = text.rstrip("-").lstrip("+-").strip()
+    text = re.sub(r"\s*[$€£]\s*$", "", text).strip()  # trailing currency
+    euro = re.search(r",(\d{2})$", text)
+    if euro:  # comma decimal: "10 750,00", "151,30", "1.234,56"
+        head = text[:euro.start()]
+        grouped = re.search(r"[.\s\xa0\u202f]", head)
+        whole = re.sub(r"[.\s\xa0\u202f]", "", head)
+        if whole.isdigit():
+            if strict_grouping and len(whole) >= 4 and not grouped:
+                return None  # ungrouped run of 4+ digits
+            value = float(f"{whole}.{euro.group(1)}")
+            return -value if negative else value
     match = re.match(r"^\$?\s*([\d,]+(?:\.\d+)?)$", text)
     if not match:
         return None
@@ -182,6 +251,389 @@ def parse_date(token: str, default_year: int | None = None) -> str | None:
     return f"{year:04d}-{month:02d}-{day:02d}"
 
 
+# --- The ledger grid (geometry solved once, not per parser) ---------------------
+
+
+RIGHT_NUMBER_RE = re.compile(r"\d{1,3}(?:[.,]\d{1,2})?\s*[$€£]?")
+BARE_GROUP_RE = re.compile(r"\d{1,3}")
+
+
+def _merge_numeric_fragments(items: list[list]) -> list[list]:
+    """Rejoin numbers the extractor split at their group spaces: a bare digit
+    group sitting within ~6pt of an amount fragment is one printed value
+    spread over two items ("10"+"750,00", "6"+"900,98 $"); unbinned, the
+    leading group scatters into a neighboring column and the cell reads
+    200,45 instead of 1 200,45. Word neighbors ("02"+"janv.") never merge."""
+    merged: list[list] = []
+    pending: list | None = None
+    for text, x1, x2 in items:
+        if pending is not None:
+            left, lx1, lx2 = pending
+            if RIGHT_NUMBER_RE.fullmatch(text) and x1 - lx2 <= 6:
+                pending = [f"{left} {text}", lx1, x2]
+                continue
+            merged.append([left, lx1, lx2])
+            pending = None
+        if BARE_GROUP_RE.fullmatch(text):
+            pending = [text, x1, x2]
+        else:
+            merged.append([text, x1, x2])
+    if pending is not None:
+        merged.append(pending)
+    return merged
+
+
+COLUMN_WORD_RE = re.compile(
+    r"^(date|posted|description|details|detail|amount|balance|debit|credit|"
+    r"withdrawals?|deposits?|type|ref|reference|no\.?|chq|cheque|value)$", re.I)
+
+
+def _find_header(lines: list[dict]) -> dict | None:
+    """The most header-like line: most items that are exactly common column
+    words (Date, Description, Amount, Balance, Debit, Credit, ...)."""
+    best, best_score = None, 0
+    for line in lines:
+        score = sum(1 for item in line["items"]
+                    if COLUMN_WORD_RE.match(item[0].strip()))
+        if score >= 2 and score > best_score:
+            best, best_score = line, score
+    return best
+
+
+def _page_furniture(lines: list[dict]) -> set[int]:
+    """Indexes of repeated page furniture — lines whose full text recurs at
+    the same y on two or more pages (running headers/footers). The grid
+    drops these or they masquerade as continuation rows and pollute the
+    description/date columns."""
+    seen: dict[tuple[str, int], set[int]] = {}
+    by_key: dict[tuple[str, int], list[int]] = {}
+    for index, line in enumerate(lines):
+        key = (line_text(line), line["y"])
+        seen.setdefault(key, set()).add(line["page"])
+        by_key.setdefault(key, []).append(index)
+    return {index for key, pages in seen.items() if len(pages) >= 2
+            for index in by_key[key]}
+
+
+def _has_money(cell: str) -> bool:
+    return any(parse_amount(token) is not None for token in cell.split())
+
+
+def _has_date(cell: str) -> bool:
+    return any(parse_date(token) is not None for token in cell.split())
+
+
+def table(lines: list[dict], header: dict | None = None, start: int | None = None,
+          stop: int | None = None, stop_terms: tuple[str, ...] | list[str] = (),
+          sections: dict[str, str] | None = None,
+          merge_continuations: bool = True) -> tuple[list[str], list[dict]]:
+    """The ledger grid as (columns, rows) — the geometry solver:
+
+        columns, rows = table(lines, stop_terms=("Transactions stop",))
+        -> (["Date", "Description", "Amount", "Balance"],
+            [{"Date": "01 Feb", "Description": "STORE 482", "Amount": "112.33",
+              "Balance": "9,844.21", "_line": 8}, ...])
+
+    header auto-detected (pass lines[i] to override). start/stop bound the
+    data range; stop_terms cuts at the first match. sections={label:
+    marker} tags each row "_section". merge_continuations: date-less,
+    money-less rows are wrapped descriptions, merged into the NEXT row
+    (banks that wrap below differ — audit via "_line"). Column bounds are
+    header-item midpoints; page furniture is dropped. Never rebuild this
+    by hand."""
+    header = header or _find_header(lines)
+    if header is None:
+        raise ValueError(
+            "no header row found — pass header=lines[i] for the line whose "
+            "items are the column words (find it with grep(lines, 'date'))")
+    heads = sorted(((text.strip(), (x1 + x2) / 2)
+                    for text, x1, x2 in header["items"]), key=lambda h: h[1])
+    columns = [text for text, _ in heads]
+    centers = [center for _, center in heads]
+    bounds = [(float("-inf") if i == 0 else (centers[i - 1] + centers[i]) / 2,
+               float("inf") if i == len(centers) - 1
+               else (centers[i + 1] + centers[i]) / 2)
+              for i in range(len(centers))]
+
+    first = start if start is not None else lines.index(header) + 1
+    last = stop if stop is not None else len(lines)
+    if stop_terms and stop is None:
+        for index in range(first, len(lines)):
+            if any(term in line_text(lines[index]) for term in stop_terms):
+                last = min(last, index)
+                break
+
+    section_of: str | None = None
+    furniture = _page_furniture(lines)
+    rows: list[dict] = []
+    for index in range(first, min(last, len(lines))):
+        if index in furniture:
+            continue
+        text = line_text(lines[index])
+        if sections:
+            for label, marker in sections.items():
+                if marker in text:
+                    section_of = label
+                    break
+        row = {column: "" for column in columns}
+        for item_text, x1, x2 in _merge_numeric_fragments(lines[index]["items"]):
+            center = (x1 + x2) / 2
+            for column, (low, high) in zip(columns, bounds):
+                if low <= center < high:
+                    row[column] = (row[column] + " " + item_text).strip()
+                    break
+        row["_line"] = index
+        if sections:
+            row["_section"] = section_of
+        if not any(row[column] for column in columns):
+            continue  # blank line
+        rows.append(row)
+
+    if not merge_continuations:
+        return columns, rows
+    desc = next((c for c in columns
+                 if "desc" in c.lower() or "detail" in c.lower()), None)
+    if desc is None:
+        return columns, rows
+
+    def anchored(row: dict) -> bool:
+        return any(_has_money(row[c]) or _has_date(row[c]) for c in columns)
+
+    merged: list[dict] = []
+    pending: dict | None = None  # wrap lines awaiting their money row
+    for row in rows:
+        if not anchored(row) and row[desc]:
+            if pending is None:  # consecutive wraps chain onto the first
+                pending = dict(row)
+            else:
+                pending[desc] = (pending[desc] + " " + row[desc]).strip()
+                for column in columns:  # keep any stray non-description content
+                    if column != desc and row[column]:
+                        pending[column] = (pending[column] + " "
+                                           + row[column]).strip()
+            continue
+        if pending is not None:
+            row[desc] = (pending[desc] + " " + row[desc]).strip()
+            for column in columns:
+                if column != desc and pending.get(column):
+                    row[column] = (pending[column] + " " + row[column]).strip()
+            pending = None
+        merged.append(row)
+    if pending is not None:  # trailing orphan: no money row ever followed
+        merged.append(pending)
+    return columns, merged
+
+
+def render_table(columns: list[str], rows: list[dict],
+                 width: int = 28) -> None:
+    """Print a table()'s (columns, rows) aligned, like a page: empty
+    columns omitted, cells wider than `width` capped with "…"."""
+    def cell(row: dict, column: str) -> str:
+        text = str(row.get(column, ""))
+        return (text[: width - 1] + "…") if len(text) > width else text
+
+    cols = [c for c in columns if any(str(r.get(c, "")).strip() for r in rows)] + [
+        c for c in ("_section",) if any(r.get("_section") for r in rows)]
+    sizes = [max(len(c), *(len(cell(r, c)) for r in rows)) if rows else len(c)
+             for c in cols]
+    print(" | ".join(c.ljust(sizes[i]) for i, c in enumerate(cols)))
+    print("-+-".join("-" * s for s in sizes))
+    for row in rows:
+        print(" | ".join(cell(row, c).ljust(sizes[i]) for i, c in enumerate(cols)))
+
+
+EURO_MONEY_RE = re.compile(
+    r"[-+]?\d{1,3}(?:[ \xa0\u202f]\d{3})+[.,]\d{2}\s*[$€£]?"
+    r"|\d{1,3}[.,]\d{2}\s*[$€£]?")
+
+
+def _anchor_on_line(line: dict, term: str) -> str | None:
+    """The value a single line offers for `term`, in resolution order:
+    items right of the label item, else the label item's own text after
+    the term (frames extraction merges close words into one item), else —
+    when the term spans items ("Solde" + "D'ouverture 1 janvier …") — the
+    first grouped-money token after the term in the line's text."""
+    needle = term.lower()
+    for text, x1, _x2 in line["items"]:
+        if needle not in text.lower():
+            continue
+        right = [t for t, a, _b in line["items"] if a > x1]
+        if right:
+            return " ".join(right)
+        tail = text[text.lower().index(needle) + len(needle):]
+        tail = tail.lstrip(" :#").strip()
+        if tail:
+            return tail
+        return None
+    whole = line_text(line)
+    pos = whole.lower().find(needle)
+    if pos >= 0:
+        match = EURO_MONEY_RE.search(whole[pos + len(needle):])
+        if match:
+            return match.group(0).strip()
+    return None
+
+
+def _labelish(text: str) -> bool:
+    """A line that looks like another label (form blocks stack labels) —
+    not a value, so not taken as the line below a label."""
+    return bool(re.match(r"^\s*\w[\w /]{0,30}:", text))
+
+
+def anchor_value(lines: list[dict], term: str, index: int = 0) -> str:
+    """The printed value of a label — beside it, after it in the same
+    printed run (merged items), or on the line below it:
+
+        anchor_value(lines, "Account No:") -> "0123 4567 8901"
+
+    Case-insensitive; index picks a later match. Raises quoting the printed
+    line (and the line below) when the label carries no value anywhere; a
+    wrong guess lists near-miss lines — read them, or grep() first."""
+    needle = term.lower()
+    seen = 0
+    quoted = None
+    for position, line in enumerate(lines):
+        if needle not in line_text(line).lower():
+            continue
+        value = _anchor_on_line(line, term)
+        below = lines[position + 1] if position + 1 < len(lines) else None
+        if (value is None and below is not None
+                and below["page"] == line["page"]
+                and not _labelish(line_text(below))):
+            value = line_text(below).strip() or None
+        if value is None:
+            if quoted is None:
+                quoted = (line_text(line),
+                          line_text(below) if below is not None else "")
+            continue
+        if seen == index:
+            return value
+        seen += 1
+    if quoted is not None:
+        raise ValueError(
+            f"{term!r} is printed but carries no value beside, after, or "
+            f"below it: {quoted[0]!r} / below: {quoted[1]!r}")
+    words = {w.strip(".,:;#").lower() for w in term.split() if len(w) >= 4}
+    near = [f"{i:03d}: {line_text(line)[:70]}" for i, line in enumerate(lines)
+            if any(w in line_text(line).lower() for w in words)][:3]
+    hint = "\n  near misses:\n  " + "\n  ".join(near) if near else ""
+    raise ValueError(f"label not printed anywhere: {term!r}{hint}")
+
+
+def regions(lines: list[dict], window: int = 6) -> list[dict]:
+    """Indicative table/form/prose map of the statement:
+
+        regions(lines) ->
+            lines 001-005  FORM    100% label: value
+            lines 007-040  TABLE   columns x≈96,180,310 · 79% money · header at 007
+
+    Heuristic — windows vote on money/date density, recurrent x-centers,
+    label: value shape. Aim render()/grep()/table() with it, never trust it
+    as a verdict. Returns the region dicts."""
+    furniture = _page_furniture(lines)
+    active = [i for i in range(len(lines)) if i not in furniture]
+    if not active:
+        print("no non-furniture lines")
+        return []
+    need = max(3, (window + 1) // 2)
+
+    stats = []
+    for i in active:
+        tokens = line_text(lines[i]).split()
+        first = lines[i]["items"][0][0].rstrip() if lines[i]["items"] else ""
+        stats.append({
+            "money": any(parse_amount(t) is not None for t in tokens),
+            "dated": any(parse_date(t) is not None for t in tokens),
+            "colon": first.endswith(":") and len(lines[i]["items"]) >= 2,
+            "words": len(tokens),
+            "bins": {int(((x1 + x2) / 2) // 16) for _t, x1, x2 in lines[i]["items"]},
+        })
+
+    def window_class(chunk: list[dict]) -> tuple[str, dict]:
+        counts: dict[int, int] = {}
+        for stat in chunk:
+            for b in stat["bins"]:
+                counts[b] = counts.get(b, 0) + 1
+        recurrent = {b for b, n in counts.items() if n >= need}
+        evidence = {
+            "money": round(sum(s["money"] for s in chunk) / len(chunk)),
+            "dated": round(sum(s["dated"] for s in chunk) / len(chunk)),
+            "colon": round(sum(s["colon"] for s in chunk) / len(chunk)),
+            "columns": sorted(recurrent),
+            "words": sum(s["words"] for s in chunk) / len(chunk),
+        }
+        if len(recurrent) >= 3 and (evidence["money"] >= 0.25
+                                    or evidence["dated"] >= 0.5):
+            kind = "table"
+        elif evidence["colon"] >= 0.5:
+            kind = "form"
+        elif evidence["words"] >= 7 and evidence["money"] <= 0.2 \
+                and len(recurrent) <= 1:
+            kind = "prose"
+        else:
+            kind = "mixed"
+        return kind, evidence
+
+    votes: dict[int, dict[str, int]] = {i: {} for i in active}
+    best: dict[int, dict] = {i: {} for i in active}
+    for offset in range(len(active)):
+        chunk = stats[offset: offset + window]
+        if not chunk:
+            break
+        kind, evidence = window_class(chunk)
+        for stat_index in range(offset, min(offset + window, len(active))):
+            line_index = active[stat_index]
+            votes[line_index][kind] = votes[line_index].get(kind, 0) + 1
+            if len(evidence["columns"]) > len(best[line_index].get("columns", ())):
+                best[line_index] = evidence
+
+    classified = []
+    precedence = ("table", "form", "prose", "mixed")  # ties go specific-first
+    for i in active:
+        kind = max(votes[i].items(),
+                   key=lambda kv: (kv[1], -precedence.index(kv[0])))[0]
+        classified.append((i, kind))
+
+    merged: list[dict] = []
+    for i, kind in classified:
+        if merged and (merged[-1]["kind"] == kind):
+            merged[-1]["stop"] = i
+        else:
+            merged.append({"start": i, "stop": i, "kind": kind})
+    # single-line runs absorb into the previous region (boundary noise)
+    for region_index in range(len(merged) - 1, 0, -1):
+        if merged[region_index]["start"] == merged[region_index]["stop"]:
+            merged[region_index - 1]["stop"] = merged[region_index]["stop"]
+            merged.pop(region_index)
+
+    for region in merged:
+        region.update(best[region["start"]])
+        region["sample"] = line_text(lines[region["start"]])
+        if region["kind"] == "table":
+            header = _find_header(lines[region["start"]: region["stop"] + 1])
+            region["header"] = (region["start"] + lines[region["start"]:
+                                region["stop"] + 1].index(header)) if header else None
+
+    for region in merged:
+        label = region["kind"].upper()
+        detail = ""
+        if region["kind"] == "form":
+            detail = f'{region["colon"]:.0%} label: value (e.g. {region["sample"][:40]!r})'
+        elif region["kind"] == "table":
+            xs = ", ".join(str(b * 16 + 8) for b in region["columns"][:6])
+            detail = (f'columns x≈{xs} · {region["money"]:.0%} money'
+                      + (f' · header at {region["header"]}'
+                         if region.get("header") is not None else ""))
+        elif region["kind"] == "prose":
+            detail = f'{region["words"]:.0f}+ words/line, no money'
+        print(f'lines {region["start"]:03d}-{region["stop"]:03d}  '
+              f'{label:<6}  {detail}')
+    if furniture:
+        print(f"furniture: {sorted(furniture)} — repeated at the same y "
+              "on 2+ pages")
+    return merged
+
+
 def reconcile(amounts: list, opening, closing, balances: list | None = None,
               tol: float = TOL) -> bool:
     """The ledger check: opening + signed amounts == closing (amounts accept
@@ -241,15 +693,34 @@ CANONICAL_FIELDS = ("bank_name", "account_number", "opening_balance",
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def ledgers_of(result) -> list:
+    """A parse() result as a list of ledger dicts: single-account parsers
+    return one dict, multi-account parsers (one PDF, several accounts, each
+    with its own balances) return a LIST of dicts, one per account."""
+    return result if isinstance(result, list) else [result]
+
+
 def validate(stmt) -> list[str]:
-    """Schema errors of a parse() result (empty list = valid). Every message
-    names the offending field/row and the fix — these strings are exactly
-    what the distill gate feeds back to the drafter."""
+    """Schema errors of a parse() result (empty list = valid): one canonical
+    dict, or a LIST of them for a multi-account PDF. Every message names the
+    offending field/row and the fix — these strings are exactly what the
+    distill gate feeds back to the drafter."""
     canonical = ("{bank_name, account_number, opening_balance, "
                  "closing_balance, transactions}")
+    if isinstance(stmt, list):
+        if not stmt:
+            return ["parse() returned an empty list — a multi-account PDF "
+                    "needs one canonical dict PER account"]
+        errors = []
+        for index, ledger in enumerate(stmt):
+            label = (ledger.get("account_number", "?")
+                     if isinstance(ledger, dict) else "?")
+            errors.extend(f"ledger {index} ({label}): {error}"
+                          for error in validate(ledger))
+        return errors
     if not isinstance(stmt, dict):
         return [f"parse() returned {type(stmt).__name__}, not the canonical "
-                f"dict {canonical}"]
+                f"dict {canonical} (or a list of them, one per account)"]
     errors = []
     for field in CANONICAL_FIELDS:
         if field not in stmt:
@@ -364,9 +835,10 @@ def _crash_hint(error: BaseException) -> str:
 TOTAL_KINDS = ("positive", "negative", "all")
 
 
-def reconcile_statement(stmt: dict, tol: float = TOL) -> str | None:
-    """Ledger check on a parsed statement: None when it reconciles, else the
-    first divergence (closing drift, the row whose printed balance breaks
+def reconcile_statement(stmt, tol: float = TOL) -> str | None:
+    """Ledger check on a parsed statement (a dict, or a list of them for a
+    multi-account PDF): None when every ledger reconciles, else the first
+    divergence (closing drift, the row whose printed balance breaks
     the running sum, or a printed section total that misses its parsed sum).
     Interpreting the message:
     - one row diverges, the rest track -> that row's sign or column binding
@@ -381,6 +853,14 @@ def reconcile_statement(stmt: dict, tol: float = TOL) -> str | None:
       the balance chain instead of read from the amount column — errors
       end-to-end reconcile mathematically cannot see
     """
+    if isinstance(stmt, list):
+        for index, ledger in enumerate(stmt):
+            failure = reconcile_statement(ledger, tol)
+            if failure:
+                label = (ledger.get("account_number", "?")
+                         if isinstance(ledger, dict) else "?")
+                return f"ledger {index} ({label}): {failure}"
+        return None
     errors = validate(stmt)
     if errors:
         return errors[0]
@@ -417,16 +897,24 @@ def reconcile_statement(stmt: dict, tol: float = TOL) -> str | None:
     return None
 
 
-def evaluate(parse_fn, statements: list[dict], key: str | None = None) -> dict:
+def evaluate(parse_fn, statements: list[dict], key: str | None = None,
+             expect_ledgers: dict[str, int] | None = None) -> dict:
     """Run parse_fn over every statement; the verdict the harness consumes:
-    {key, stage, results: [{name, ok, rows, error}], clean, verified}. The
-    error strings are the drafter's feedback: crashes carry a remedial hint
-    for known shapes (see _crash_hint), schema violations name the row and
-    the fix, and reconcile failures name the divergent row."""
+    {key, stage, results: [{name, ok, rows, ledgers, error}], clean, verified}.
+    The error strings are the drafter's feedback: crashes carry a remedial
+    hint for known shapes (see _crash_hint), schema violations name the row
+    and the fix, and reconcile failures name the divergent row.
+    expect_ledgers (optional): per-statement ledger counts {statement name:
+    count} pinned from a PREVIOUSLY VERIFIED version — maintenance must keep
+    returning the same count per statement. Arithmetic that reconciles over
+    a different number of ledgers is partial (or split) coverage the gate
+    cannot otherwise see, so it fails with a coverage error instead of
+    verifying. Statements absent from the map carry no expectation."""
     results = []
     clean = 0
     for frames in statements:
         entry = {"name": frames["name"], "ok": False, "rows": 0, "error": ""}
+        expected = (expect_ledgers or {}).get(frames["name"])
         try:
             stmt = parse_fn(frames)
         except Exception as error:  # noqa: BLE001 - the verdict IS the catcher
@@ -444,9 +932,20 @@ def evaluate(parse_fn, statements: list[dict], key: str | None = None) -> dict:
             if failure:
                 entry["error"] = f"reconcile: {failure}"
             else:
-                entry["ok"] = True
-                entry["rows"] = len(stmt["transactions"])
-                clean += 1
+                ledgers = ledgers_of(stmt)
+                entry["rows"] = sum(len(l["transactions"]) for l in ledgers)
+                entry["ledgers"] = len(ledgers)
+                if expected is not None and len(ledgers) != expected:
+                    entry["error"] = (
+                        f"coverage: parse() returned {len(ledgers)} ledger(s) "
+                        f"but the registered parser returned {expected} for "
+                        "this statement — keep every account covered (a LIST "
+                        "with one canonical dict PER account); arithmetic that "
+                        "reconciles over a subset of the accounts is partial "
+                        "coverage")
+                else:
+                    entry["ok"] = True
+                    clean += 1
         results.append(entry)
     return {"key": key, "stage": "parse", "results": results, "clean": clean,
             "verified": clean == len(statements) and clean > 0}
