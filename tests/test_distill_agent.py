@@ -235,6 +235,74 @@ def test_overflow_error_forces_elision_and_recovers(tmp_path):
     assert request_chars[5] < request_chars[4]  # retry ran on less history
 
 
+def test_python_duplicate_key_ignores_comments_and_whitespace(tmp_path):
+    ctx = make_ctx(tmp_path)
+    first = agent.call_key("python", json.dumps(
+        {"code": "a = 1  # probe v1\nprint(a)"}), ctx)
+    second = agent.call_key("python", json.dumps(
+        {"code": "a = 1 # probe v2\nprint(a)"}), ctx)
+    assert first is not None and first == second  # rotating comments decoy
+    other = agent.call_key("python", json.dumps(
+        {"code": "a = 2  # probe v1\nprint(a)"}), ctx)
+    assert other != first
+
+
+def test_loop_breaker_redirects_then_aborts(tmp_path):
+    """A model replaying one identical call forever: NOTE, then refusals —
+    the redirect message lands at 3 refused turns (with 3 sampled requests
+    armed), the run aborts with a diagnosis at 6 instead of burning the
+    whole turn budget."""
+    ctx_frames = copper_frames()
+    (tmp_path / "frames.json").write_text(json.dumps(ctx_frames))
+    state = {"i": 0}
+    temperatures: list[float] = []
+    user_messages: list[str] = []
+
+    def chat(messages, tools, temperature=0.0):
+        state["i"] += 1
+        temperatures.append(temperature)
+        user_messages.extend(m["content"] for m in messages
+                             if m.get("role") == "user")
+        return call("grep", {"pattern": "stop"}, f"c{state['i']}")
+
+    trace = agent.Trace(tmp_path)
+    artifact, verified, history = agent.agent_loop(
+        [Path("fixture.pdf")], tmp_path, 30, trace, frames=ctx_frames,
+        chat=chat)
+    trace.close()
+    assert not verified and artifact is None
+    outcomes = [h["outcome"] for h in history]
+    assert any(o.startswith("loop abort") for o in outcomes)
+    assert history[-1]["turn"] < 30  # aborted early, not at the cap
+    assert any("in a loop" in text for text in user_messages)
+    # the NOTE at turn 2 arms a one-shot sample (turn 3); every refused turn
+    # is also a duplicate, so the sample stays armed throughout the loop —
+    # 0.4 from turn 3 on; redirect at streak 3 (turn 5), abort at streak 6
+    # (turn 8)
+    assert temperatures == [0.0, 0.0, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4]
+
+
+def test_python_tool_hint_for_frames_shape_confusion(tmp_path):
+    ctx = make_ctx(tmp_path)
+    result = agent._tool_python(ctx, {"code": "import statementledger as pl\n"
+                                         "frames = pl.load_frames()\n"
+                                         "print(frames['statements'])"})
+    assert "CRASHED" in result and "HINT:" in result
+    assert "LIST of statements" in result
+
+
+def test_lint_rejects_transcribed_cents_floats():
+    bad = ('KEY = "us__a__b__1"\n'
+           'def parse(frames):\n'
+           '    return {"totals": [{"label": "T", "kind": "positive",'
+           ' "value": 7269.81}]}\n')
+    violation = agent.lint_code(bad)
+    assert violation and "7269.81" in violation
+    # whole floats and small constants stay legal
+    assert agent.lint_code('KEY = "us__a__b__1"\n'
+                           'def parse(f):\n    return {"x": 200.0 + 0.35}\n') is None
+
+
 def test_circuit_breaker_refuses_third_identical_call(tmp_path):
     ctx_frames = copper_frames()
     (tmp_path / "frames.json").write_text(json.dumps(ctx_frames))

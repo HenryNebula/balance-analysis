@@ -66,6 +66,17 @@ REPAIR_MESSAGE = (
     "tool schemas are attached to every request."
 )
 
+LOOP_MESSAGE = (
+    "You are in a loop: the same call keeps being refused, and repeating "
+    "it will not change the result. Step back — call read to see parser.py "
+    "as it is, make one edit toward the last verdict's named error, then "
+    "run. If your probe keeps crashing, read the LAST line of its "
+    "traceback: it names the exact wrong assumption."
+)
+
+LOOP_REDIRECT_AT = 3  # consecutive refused turns before the redirect message
+LOOP_ABORT_AT = 6     # ...before the run is abandoned with a diagnosis
+
 
 # --- Prompts (jinja templates in tools/prompts/) --------------------------------
 
@@ -382,6 +393,16 @@ def lint_code(code: str) -> str | None:
             return (
                 f"numeric literal {value} is in the transaction-amount range — "
                 "hardcoding data is forbidden; compute values from the frames"
+            )
+        if (
+            isinstance(value, float) and abs(value) >= 50
+            and value != int(value)
+            and abs(value * 100 - round(value * 100)) < 1e-9
+        ):
+            return (
+                f"float literal {value} looks like a printed amount (cents, "
+                ">= 50) — transcribing statement values into the parser is "
+                "forbidden; derive them from the frames at runtime"
             )
     return None
 
@@ -710,6 +731,24 @@ def _tool_table(ctx: Ctx, args: dict) -> str:
     return payload[:TOOL_RESULT_CAP] + ("\n(truncated)" if len(payload) > TOOL_RESULT_CAP else "")
 
 
+CRASH_HINTS = (
+    (r"KeyError: 0|indices must be integers",
+     "pl.load_frames() returns the LIST of statements — frames[i] is a "
+     'statement, frames[i]["lines"] its lines, and an item is a '
+     "[text, x1, x2] LIST, not a dict"),
+    (r"'list' object has no attribute 'items'",
+     "items are [text, x1, x2] lists, not dicts — index them; .items() is "
+     "for dicts"),
+)
+
+
+def _crash_hint(stderr: str) -> str | None:
+    for pattern, hint in CRASH_HINTS:
+        if re.search(pattern, stderr):
+            return hint
+    return None
+
+
 def _tool_python(ctx: Ctx, args: dict) -> str:
     ctx.probes += 1
     (ctx.workdir / "probe.py").write_text(str(args.get("code", "")))
@@ -717,6 +756,9 @@ def _tool_python(ctx: Ctx, args: dict) -> str:
     parts = []
     if outcome["returncode"] != 0:
         parts.append(f"CRASHED:\n{outcome['stderr'][-1500:] or '(no stderr)'}")
+        hint = _crash_hint(outcome["stderr"])
+        if hint:
+            parts.append(f"HINT: {hint}")
     if outcome["stdout"].strip():
         parts.append(outcome["stdout"][-OUTPUT_TAIL:])
     elif outcome["returncode"] == 0:
@@ -828,12 +870,27 @@ def _tool_run(ctx: Ctx) -> tuple[str, str]:
     return payload + note, "run"
 
 
+def _normalized_code(arguments: str) -> str | None:
+    """python-tool code with comments stripped and whitespace collapsed —
+    near-variant probes (same code, rotating '# check this' comments) are
+    the same probe and should hit the duplicate ladder."""
+    try:
+        code = json.loads(arguments).get("code", "")
+    except (ValueError, AttributeError):
+        return None
+    return re.sub(r"\s+", " ", re.sub(r"#[^\n]*", "", str(code))).strip()
+
+
 def call_key(name: str, arguments: str, ctx: Ctx) -> str | None:
     """Canonical (tool, args) identity for duplicate detection; None when
     the arguments don't parse (those get their own error feedback). run
     and read take no arguments but consume parser.py — they key on the
     file's current content, so re-running after an edit is never a
-    duplicate and re-running without one always is."""
+    duplicate and re-running without one always is. python keys on the
+    code with comments/whitespace normalized."""
+    if name == "python":
+        normalized = _normalized_code(arguments)
+        return None if normalized is None else f"python#{hash(normalized)}"
     try:
         args = json.dumps(json.loads(arguments), sort_keys=True)
     except (ValueError, json.JSONDecodeError, TypeError):
@@ -969,7 +1026,8 @@ def agent_loop(
     # temperature-0 model otherwise replays the same call forever, and each
     # replayed turn reinforces the pattern in-context.
     seen_calls: dict[str, list[int]] = {}
-    escape_temperature = 0.0
+    escape_requests = 0  # upcoming requests sampled at 0.4 (loop escape)
+    refusal_streak = 0
 
     for turn in range(1, turns + 1):
         saved = elide_middle(messages, threshold=compact_chars)
@@ -977,6 +1035,7 @@ def agent_loop(
             trace.log(f"turn {turn} context elided", f"{saved} chars saved")
             seen_calls.clear()  # post-elision repeats re-fetch lost output
         request_chars = message_chars(messages)  # what this turn's call costs
+        escape_temperature = 0.4 if escape_requests > 0 else 0.0
         try:
             raw = chat(messages, TOOLS, temperature=escape_temperature)
         except RuntimeError as error:
@@ -998,6 +1057,7 @@ def agent_loop(
         chat_fails = 0
         message = normalize_message(raw, turn)
         messages.append(message)
+        escape_requests = max(0, escape_requests - 1)
 
         calls = message.get("tool_calls") or []
         if not calls:
@@ -1012,6 +1072,7 @@ def agent_loop(
         kinds: list[str] = []
         last_tool: dict | None = None
         duplicated = False
+        refused = False
         for call in calls:
             function = call.get("function", {})
             tool_name = function.get("name", "")
@@ -1026,6 +1087,7 @@ def agent_loop(
                     if seen_calls[key][1] >= 3:  # circuit breaker
                         result = refusal_note(tool_name, seen_calls[key][1])
                         kind = "look"
+                        refused = True
                         trace.line(f"turn {turn}: REFUSED duplicate "
                                    f"{tool_name} call (x{seen_calls[key][1]})")
                     else:
@@ -1051,7 +1113,25 @@ def agent_loop(
                         "code": (workdir / "parser.py").read_text()}, True, history
         # one stochastic request after any duplicate — the escape hatch for
         # deterministic (temperature 0) replay loops; back to greedy after.
-        escape_temperature = 0.4 if duplicated else 0.0
+        if duplicated:
+            escape_requests = max(escape_requests, 1)
+        if refused:
+            refusal_streak += 1
+            if refusal_streak >= LOOP_ABORT_AT:
+                trace.line(f"turn {turn}: loop abort — {refusal_streak} "
+                           "consecutive turns of refused duplicate calls")
+                history.append({"turn": turn,
+                                "calls": [c.get("function", {}).get("name") for c in calls],
+                                "outcome": f"loop abort after {refusal_streak} "
+                                           "refused turns"})
+                break
+            if refusal_streak == LOOP_REDIRECT_AT:
+                messages.append({"role": "user", "content": LOOP_MESSAGE})
+                escape_requests = 3
+                trace.line(f"turn {turn}: loop breaker — redirect message "
+                           "sent, 3 sampled requests armed")
+        else:
+            refusal_streak = 0
 
         ran = "run" in kinds
         gate_crashed = ran and ctx.last_gate_crashed
