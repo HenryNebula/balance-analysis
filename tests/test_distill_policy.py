@@ -33,7 +33,7 @@ def test_prompt_templates_render_clean():
     assembled = harness.render_prompt("assembly.j2.md")
     for marker in ("# Frames", "# The deliverable", "# Rules",
                    "# Sandbox tools", "# Response contract", "KEY = ",
-                   "pl.table", "if __name__"):
+                   "pl.table", "if __name__", "x_left", "x=292"):
         assert marker in assembled, marker
     assert "{{" not in assembled and "{%" not in assembled
     task = harness.render_prompt("task.j2.md", name="stmt.pdf",
