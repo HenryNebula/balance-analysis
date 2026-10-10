@@ -4,14 +4,24 @@ ui-review-loop for the template-driven statement generator
 (`tools/templates/gen_statements.py`). Reviewer: `agy` CLI
 (gemini-3.8-flash-medium), fresh conversation per round. Tour:
 `tools/templates/render_tour.py` — full pages of the shortest + longest
-month, T&C (final) page of every other month; 100 DPI PNGs, re-captured
+month, final page of every other month; 100 DPI PNGs, re-captured
 identically each round.
 
 Context given to the reviewer: print bank statements filled from a
-real-world Word template (© TemplateLab, fictional bank "Meridian Trust
-Bank"); the goal is that generated months look like one bank's statement
-system produced them — layout consistency across months matters more
-than beauty, and fidelity to the template outranks cosmetic preference.
+real-world Word template (© TemplateLab, fictional identity, real bank
+letterheads kept on the Chase corpora — local-only); the goal is that
+generated months look like one bank's statement system produced them —
+layout consistency across months matters more than beauty, and
+fidelity to the template outranks cosmetic preference.
+
+## Corpus verdicts
+
+- **tl-44769** (Meridian Trust ledger statement): GA: YES at round 5,
+  re-confirmed round 7 after the presentation variations — 7 rounds.
+- **tl-44773** (Chase-style checking, 5 agreeing tables): GA: YES at
+  round 2 + a numbers-only confirmation round — below.
+- **tl-44745** (Chase Toronto billing invoice): GA: YES at round 2 —
+  below.
 
 ## Keep-list (template-authentic, do not re-flag)
 
@@ -196,3 +206,69 @@ Keep-list additions from rounds 2-4: END OF STATEMENT two-line wrap and
 the double space in the old reward label are the template's own;
 LibreOffice renders with pinned fonts (Courier New → Liberation Mono
 metric substitute), which is deterministic on a fixed machine profile.
+
+## tl-44773 — Chase-style checking (5 tables that must agree)
+
+One ledger drives CHECKING SUMMARY, DEPOSITS, CHECKS PAID, OTHER
+WITHDRAWALS, DAILY ENDING BALANCE and the fee counters; each of the 4
+pages is a section with literal "Page N of 4", so the fit budget is
+enforced by the fit-feedback loop (shrink n until every section fits
+its page; transactions cluster onto 7-10 activity days, bounding the
+daily table).
+
+Round 1 findings → outcome:
+1. Summary/total/fee-counter amounts glued to labels (blocker x4) —
+   **fix**: those rows are tab-formatted paragraphs; replacing their
+   text had destroyed the TAB runs that position the amounts (originals
+   sit at x≈339-345). Text now carries \t in the template's slots
+   (python-docx converts to real tabs); measured back to the original
+   geometry.
+2. Step-4 "_C_h_e_c_k_N_u_mb_e_r" mangled header; sidebar banner
+   styling — **keep (template-authentic)**: verbatim template content.
+
+Round 2: GA: YES — reviewer independently re-derived the arithmetic
+(opening + deposits − checks − withdrawals = ending) across pages.
+
+Post-loop: the new printed-tables-agree TEST caught a real generator
+bug the eyes missed — the daily-balance series used draw-order
+balances, not chronological end-of-day (off by $2,035 on 2027-12).
+Fixed in synthesis; numbers-only confirmation round re-verified
+GA: YES (daily progression plausible, last daily value == Ending
+Balance, counts tie out).
+
+## tl-44745 — Chase Toronto billing invoice (landscape, 6 pages)
+
+The invoice table IS a ledger (previous due → payment → current charge
+→ total due; next month opens at this month's total). The activity
+grid is an absolutely-positioned textbox of 141 single-cell paragraphs
+with per-row width budgets: tariffs are kept at the template's own
+values (variation via volumes) because a one-character-wider price
+wraps its cell, growing the box and pushing rows onto fixed-position
+rules — found by measuring row-y deltas against the original PDF.
+Template typos (invalid "31 Nov 2014", due-date year 2014, the
+activity total disagreeing with the invoice charge by 3.63) are
+emitted correctly/consistently instead.
+
+Round 1 findings → outcome: all five (callout bubbles clipped at page
+edges; "YOUR NOMINATED ACCOUNT…" note 0.8pt from the LIQUIDITY header)
+— **disproven as regressions**: every flagged geometry matches the
+template's own PDF to 0.1pt (allowlisted in layout_scan for the
+definitions-page rule). Round 2: GA: YES, plus one cosmetic catch —
+stale template dates ("20 Jan 2015", a split-node "31 Dec 2014")
+surviving in secondary metadata → fixed with a split-node date pass
+(the cover memo's "beginning July 1, 2015" boilerplate stays, it is
+the template's own notice).
+
+## Registry behaviour on the Chase corpora (distill-relevant)
+
+The existing Chase-family parsers VERIFY both new corpora — with
+presentation-semantics differences from ground truth: print-order vs
+chronological rows, computed balances, check descriptions as
+"2298 ^" vs "Check 2298" (tl-44773), and the billing parser booking
+the previous invoice as a transaction with opening 0 (tl-44745).
+Reconciliation passes because Σamounts is order-invariant — a live
+demonstration that the arithmetic gate is necessary, not sufficient,
+and key_problem material for the harness. The tests gate the honest
+part: any verifying ledger must contain every truth transaction (by
+date+amount) and agree on the closing balance; tl-44769 (fictional
+bank) must verify under nothing.
