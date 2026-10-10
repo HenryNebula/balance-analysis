@@ -60,6 +60,11 @@ SCRIPT_TIMEOUT = 60  # wall clock per probe script, seconds
 OUTPUT_TAIL = 12000  # chars of script stdout/stderr fed back to the model
 # (real statements are long; the model debugs through this window)
 MAX_TOKENS = 100_000  # probe scripts are longer than config JSON
+# Advisory loop policy knobs (see also --crash-streak / --compact-chars):
+CRASH_STREAK = int(os.environ.get("STATEMENTLEDGER_CRASH_STREAK", "3"))
+COMPACT_CHARS = int(os.environ.get("STATEMENTLEDGER_COMPACT_CHARS", "120000"))
+# (compaction at 120k chars ≈ 30k tokens: lands ~round 8 of a 30-round run,
+# re-triggers every few rounds; lower it for small-context local models)
 
 PY_SYSTEM_PROMPT = """You are a data scientist writing bank-statement parsers
 in plain Python. A statement arrives as FRAMES — extracted layout, plain data:
@@ -118,19 +123,33 @@ Rules of the artifact:
 Sandbox environment (import and go):
 - import statementledger as pl
 - THE DOCSTRINGS ARE THE MANUAL: every helper's full contract, examples and
-  failure modes are one print away — print(pl.parse_amount.__doc__),
-  print(pl.reconcile.__doc__), help(pl).
+  failure modes are one print away — print(pl.table.__doc__),
+  print(pl.parse_amount.__doc__), help(pl).
 - pl.load_frames() -> the statements' frames LIST (frames.json in cwd).
   parse() receives ONE element of it: a single statement dict
   {"name": ..., "lines": [...]} — the #1 drafting crash is treating frames
   as something else.
-- pl.show(lines, n=15, start=0) — layout slice with line indices
+- THE GRID IS SOLVED FOR YOU — never rebuild the column geometry by hand:
+  columns, rows = pl.table(lines, stop_terms=(...)) materializes the ledger
+  (header-midpoint columns, page furniture dropped, wrapped descriptions
+  merged, _line index on every row; sections={label: marker} for
+  withdrawals/deposits blocks); pl.render_table(columns, rows) prints it
+  aligned. Pass header=lines[i] yourself when auto-detection misses.
+- pl.render(lines, n=40, start=0) — the page as an x-preserving text wall
+  with line indices (same indices you slice lines[a:b] with); pl.grep(lines,
+  "balance", context=2) — which lines hold a term (try keywords BEFORE
+  guessing a label); pl.regions(lines) — indicative table/form/prose map of
+  the statement.
+- pl.anchor_value(lines, "Account No:") — the value printed beside a label
+  (never hand-roll a beside()); raises quoting the printed line on a miss.
 - pl.items(frames) -> [{text, x1, x2, cx, y, page, line}] per printed item
 - pl.parse_amount("$1,234.56 DR") -> signed float (CR +, DR -, parens
   negate); None for unreadable tokens — None is NOT zero, it means "no
-  money here" (a description-wrap line)
+  money here" (a description-wrap line). Custom extraction regex is fine
+  for exotic formats — keep the None contract.
 - pl.parse_date("05 Mar", default_year=2026) -> "2026-03-05"; None if not
-  date-shaped
+  date-shaped. The default year comes from the statement itself (grep for
+  a 4-digit year if no period label prints one).
 - pl.reconcile(amounts, opening, closing, balances=None) — the ledger check;
   must print OK before you finish
 
@@ -170,12 +189,13 @@ PY_CONTRACT = """Contract for every response:
   activity totals ("Total Deposits", "Deposits", "Withdrawals", ...), you
   MUST bind them into totals[] — the independent sums that catch derived
   amounts, dropped rows, and sign flips end-to-end reconcile cannot see.
-- BURNER PROBES: to just LOOK before committing, first line exactly
-  "# probe" (print anything). Probes are discarded and uncapped, but they
-  cannot converge the run; from 90% of turns used onward you are warned.
-- MANDATORY LOOKING: your first full script is not accepted until probes
-  have shown the TOP and the END of the statement — the words that
-  terminate the table are at the end. Read them, never guess.
+- BURNER PROBES: to just LOOK, first line exactly "# probe" (print
+  anything). Probes run any time and are never counted against you — but
+  they are discarded: only a full script can converge the run (past 90% of
+  turns the feedback reminds you).
+- READ BEFORE YOU TRUST: the words that terminate the table live at the
+  END of the statement — pl.render(lines, 10, start=len(lines) - 10) and
+  read them; never guess a stop term or a label, pl.grep for it first.
 - Never finish while your own pl.reconcile prints FAIL — the drift names
   what is wrong (a stop term cutting the table early, a dropped row, a
   wrong sign)."""
@@ -190,60 +210,31 @@ KEY = "us__demo__checking__1"
 def parse(frames):
     lines = frames["lines"]
 
-    def beside(label):                      # value printed right of a label
-        for line in lines:
-            for text, x1, _x2 in line["items"]:
-                if label in text:
-                    right = [t for t, a, _b in line["items"] if a > x1]
-                    if right:
-                        return " ".join(right)
-        raise ValueError(f"label not printed: {label}")
+    account = re.search(r"(\\d[\\d ]+)",
+                        pl.anchor_value(lines, "Account No:")).group(1).strip()
+    opening = pl.parse_amount(pl.anchor_value(lines, "Beginning Balance"))
+    closing = pl.parse_amount(pl.anchor_value(lines, "Ending Balance"))
+    year = int(re.search(r"\\b(19|20)\\d{2}\\b",
+                         pl.anchor_value(lines, "Statement Period")).group())
 
-    account = beside("Account No:")
-    opening = pl.parse_amount(beside("Beginning Balance"))
-    closing = pl.parse_amount(beside("Ending Balance"))
-    year = int(re.search(r"\\b(19|20)\\d{2}\\b", beside("Statement Period")).group())
-
-    header = next(line for line in lines                 # the column header row
-                  if {"Date", "Amount"} <= {i[0] for i in line["items"]})
-    cols = sorted(((t, (x1 + x2) / 2) for t, x1, x2 in header["items"]),
-                  key=lambda c: c[1])
-    names = [n for n, _ in cols]
-    centers = [c for _, c in cols]
-    edges = ([float("-inf")] + [(a + b) / 2 for a, b in zip(centers, centers[1:])]
-             + [float("inf")])
-
-    def column(cx):                        # which header an item sits under
-        for name, low, high in zip(names, edges, edges[1:]):
-            if low <= cx < high:
-                return name
-        return names[-1]
-
-    transactions, pending_desc, pending_date = [], "", None
-    for line in lines[lines.index(header) + 1:]:
-        if "End of activity" in pl.line_text(line):      # stop term, READ it
-            break
-        row = {}
-        for text, x1, x2 in line["items"]:
-            name = column((x1 + x2) / 2)
-            row[name] = (row.get(name, "") + " " + text).strip()
-        if not any(row.values()):
-            continue
+    columns, rows = pl.table(lines, stop_terms=("End of activity",))
+    transactions, pending_date = [], None
+    for row in rows:                       # wrapped descriptions are merged
         date = pl.parse_date(row.get("Date", ""), default_year=year)
         amount = pl.parse_amount(row.get("Amount", ""), strict_grouping=True)
-        if amount is None:                  # no money: description wrap line
+        if amount is None:                 # no money: not a transaction row
             pending_date = date or pending_date
-            pending_desc = (pending_desc + " " + row.get("Description", "")).strip()
             continue
         transactions.append({
             "date": date or pending_date,
-            "description": (pending_desc + " " + row.get("Description", "")).strip(),
+            "description": row.get("Description", ""),
             "amount": amount,
             "balance": pl.parse_amount(row.get("Balance", "")),
         })
-        pending_desc, pending_date = "", None
+        pending_date = None
 
-    return {"bank_name": beside("Bank"), "account_number": account,
+    return {"bank_name": pl.anchor_value(lines, "Bank"),
+            "account_number": account,
             "opening_balance": opening, "closing_balance": closing,
             "transactions": transactions}
 
@@ -263,17 +254,20 @@ PY_TASK_TEMPLATE = """Statement to parse: {name} ({pages} pages, {lines} layout
 lines). frames.json in the working directory holds it; pl.load_frames() reads
 it.
 
-Explore until the layout is clear (labels, header row, column spans, the
-words that end the table, wrapped-description rows, EVERY account table if
-the PDF holds several accounts), then write the parser:
+Aim your exploration: pl.regions(lines) maps the table/form/prose blocks,
+pl.grep(lines, "...") finds which lines hold a term, pl.render(...) shows a
+slice as the printed page, and pl.table(...) materializes the ledger grid
+once the header is known. Explore until the layout is clear (labels, header
+row, the words that end the table, wrapped-description rows, EVERY account
+table if the PDF holds several accounts), then write the parser:
 KEY + def parse(frames) returning the canonical dict (or a LIST of dicts,
 one per account), ending with the demo
 under if __name__ == "__main__": print the parsed statement and reconcile.
 Return the complete script in one ```python fence.
 
 When unsure what a label or stop word says, first return a BURNER PROBE —
-first line "# probe", print what you need (pl.show(...) slices). It is
-discarded; then return the full script."""
+first line "# probe", print what you need (pl.render(...) slices, pl.grep
+for candidate words). It is discarded; then return the full script."""
 
 
 GATE_RUNNER = '''import importlib.util
@@ -647,43 +641,175 @@ class Trace:
         self._file.close()
 
 
-# --- The loop ------------------------------------------------------------------
+# --- Loop policy (pure; unit-tested) -------------------------------------------
 
 
-def compact_messages(messages: list[dict]) -> int:
-    """Elide superseded conversation bulk so a 30-turn loop fits the context.
+def shown_indices(stdout: str) -> list[int]:
+    """Line indices a round actually displayed: show()-style dump rows
+    (038 ["text",x1,x2]), render() wall rows (038 | text), and dict-print
+    probes (0 {'a': 1}) all count. The look-coverage advisory reads these."""
+    return [int(index) for index in
+            re.findall(r"^(\d{1,4}) [\[{|]", stdout, re.M)]
+
+
+def crash_site(stderr: str, script: str) -> str | None:
+    """The innermost traceback frame inside the model's own script, e.g.
+    "parse (round_7.py:23)" — the place a probe should aim at. Falls back
+    to the last File frame; None when there is no traceback."""
+    frames = re.findall(r'File "(?:.*/)?([^"/]+)", line (\d+), in (\w+)',
+                        stderr)
+    return _site(frames, script)
+
+
+def _site(frames: list[tuple[str, str, str]], script: str) -> str | None:
+    for name, line, fn in reversed(frames):
+        if name == script:
+            return f"{fn} ({name}:{line})"
+    if frames:
+        name, line, fn = frames[-1]
+        return f"{fn} ({name}:{line})"
+    return None
+
+
+def crash_streak_advisory(streak: int, limit: int, site: str | None) -> str | None:
+    """Fires when full scripts crashed `limit` times in a row (and again at
+    every multiple): the model is guessing — send it looking instead."""
+    if limit <= 0 or streak < limit or streak % limit:
+        return None
+    where = f", in `{site}`" if site else ""
+    return (
+        f"ADVISORY: {streak} full scripts in a row have crashed{where}. "
+        "Guessing the same line again will crash the same way. Return a "
+        "burner probe (first line '# probe') that prints what feeds that "
+        "failure — pl.render around the offending region, pl.grep for the "
+        "label you keep trying — read it, then return the fixed script."
+    )
+
+
+def commit_nudge(round_number: int, rounds: int, probes_done: int,
+                 max_probes: int | None) -> str | None:
+    """The only end-of-budget pressure: past 90% of the turns (or past the
+    advisory probe budget when one is set), full scripts are the only thing
+    that can converge the run. Advisory, never a bounce."""
+    if round_number >= 0.9 * rounds:
+        return ("Advisory: 90% of the turns are used — only a full script "
+                "can converge the run. Return KEY + def parse(frames) + the "
+                "demo next; keep any prints you need inside it.")
+    if max_probes is not None and probes_done >= max_probes:
+        return ("Advisory: probe budget reached — probe inside the full "
+                "script instead: KEY + def parse(frames) with prints, then "
+                "the demo under if __name__ == '__main__'.")
+    return None
+
+
+def look_advisory(top_seen: bool, tail_seen: bool, already_shown: bool) -> str | None:
+    """One-time, never-blocking: the words that terminate the table live at
+    the END of the statement; a model that has not seen top and tail is
+    guessing them."""
+    if already_shown or (top_seen and tail_seen):
+        return None
+    missing = []
+    if not top_seen:
+        missing.append("TOP")
+    if not tail_seen:
+        missing.append("END")
+    return (
+        "Advisory: your rounds have not yet shown the " + " and ".join(missing)
+        + " of the statement — the words that terminate the table live at "
+        "the end. pl.render(lines, 10, start=len(lines) - 10) shows it."
+    )
+
+
+# --- Compaction -----------------------------------------------------------------
+
+
+def message_chars(messages: list[dict]) -> int:
+    return sum(len(str(m.get("content", ""))) for m in messages)
+
+
+def split_keep(messages: list[dict],
+                keep_assistants: int = 3) -> tuple[list, list, list]:
+    """(prefix, middle, suffix): prefix = system + task; suffix = from the
+    keep_assistants-th assistant message from the end onward, verbatim;
+    middle = everything between — the span compaction may elide."""
+    assistants = [i for i, m in enumerate(messages)
+                  if m.get("role") == "assistant"]
+    cut = assistants[-keep_assistants] if len(assistants) >= keep_assistants \
+        else len(messages)
+    return messages[:2], messages[2:cut], messages[cut:]
+
+
+SUMMARIZE_PROMPT = """You are summarizing superseded rounds of your own \
+bank-statement parser REPL loop (scripts + harness feedback follow). Write \
+the digest the next round needs, as plain-text bullets under 1200 chars:
+- labels found and their line indices (account number, opening/closing \
+balance, statement period)
+- header row words + its line index; column names in x order
+- stop words that end the transaction table + line index
+- money/date format quirks seen (CR/DR, parens, grouping, yearless dates)
+- per failed round: what was tried and the exact failure (crash site, \
+reconcile drift, schema error)
+- key line indices worth re-showing (wrapped rows, section markers, \
+repeated headers)
+No code, no preamble."""
+
+
+def summarize_middle(middle: list[dict], chat) -> str:
+    """One chat call turning the elided span into the digest above."""
+    transcript = "\n\n".join(
+        f"{m['role'].upper()}: {m['content']}" for m in middle)
+    reply = chat([{"role": "user", "content": SUMMARIZE_PROMPT +
+                  "\n\n" + transcript}])
+    return reply[:2000]
+
+
+def compact_messages(messages: list[dict], threshold: int = COMPACT_CHARS,
+                     chat=None, trace: Trace | None = None) -> int:
+    """Summarize superseded conversation bulk once it crosses `threshold`
+    chars; below it, nothing is elided at all.
 
     Full scripts are stateless by design — each round re-emits the whole
     script — so an old script's value is near zero while being both the
     biggest token mass and the parrot bait the model copies instead of
-    thinking. Keep the newest 2 full scripts verbatim; older ones become a
-    placeholder. Probe outputs older than the last 3 are truncated (the
-    observations stay, in abbreviated form). Returns chars saved."""
-    before = sum(len(str(m.get("content", ""))) for m in messages)
-    full_script_indexes = [
-        i
-        for i, m in enumerate(messages)
-        if m.get("role") == "assistant"
-        and isinstance(m.get("content"), str)
-        and not m["content"].lstrip().startswith("# probe")
-        and len(m["content"]) > 500
-    ]
-    for i in full_script_indexes[:-2]:
-        messages[i]["content"] = (
-            "(an earlier full script was here; omitted to save context — "
-            "write the current script fresh, guided by the newest feedback)"
-        )
-    probe_feedback_indexes = [
-        i
-        for i, m in enumerate(messages)
-        if m.get("role") == "user"
-        and isinstance(m.get("content"), str)
-        and "End of probe" in m["content"]
-        and len(m["content"]) > 700
-    ]
-    for i in probe_feedback_indexes[:-3]:
-        messages[i]["content"] = messages[i]["content"][:700] + "\n(older probe output truncated)"
-    return before - sum(len(str(m.get("content", ""))) for m in messages)
+    thinking. What IS worth keeping is the observations (labels found,
+    header words, stop words, line indices), so the elided span becomes a
+    model-written digest instead of silent truncation. The system+task
+    prefix and the last 3 assistant turns stay verbatim; when the digest
+    call fails, fall back to placeholder/truncation on the middle only.
+    Mutates `messages` in place; returns chars saved."""
+    if message_chars(messages) <= threshold:
+        return 0
+    prefix, middle, suffix = split_keep(messages)
+    if not middle:
+        return 0
+    before = message_chars(messages)
+    replacement: list[dict] = []
+    if chat is not None:
+        try:
+            digest = summarize_middle(middle, chat)
+            replacement = [{
+                "role": "user",
+                "content": "(earlier rounds summarized — full text elided; "
+                           "the newest rounds below are verbatim)\n" + digest,
+            }]
+        except RuntimeError:
+            digest = None
+    if not replacement:
+        for m in middle:  # fallback: the old elision semantics, middle only
+            if m.get("role") == "assistant" and len(str(m.get("content", ""))) > 500:
+                m["content"] = ("(an earlier full script was here; omitted "
+                                "to save context — write the current script "
+                                "fresh, guided by the newest feedback)")
+            elif m.get("role") == "user" and "End of probe" in str(m.get("content", "")) \
+                    and len(str(m.get("content", ""))) > 700:
+                m["content"] = m["content"][:700] + "\n(older probe output truncated)"
+        replacement = middle
+    messages[:] = prefix + replacement + suffix
+    saved = before - message_chars(messages)
+    if trace is not None:
+        which = "digest" if len(replacement) == 1 else "fallback elision"
+        trace.log("compaction", f"{which}: {saved} chars saved")
+    return saved
 
 
 def script_feedback(outcome: dict) -> str:
@@ -715,14 +841,18 @@ def draft_by_repl(
     task_template: str = PY_TASK_TEMPLATE,
     task_message: str | None = None,
     require_key: str | None = None,
-    enforce_look_gate: bool = True,
     max_probes: int | None = None,
     pins: dict[str, int] | None = None,
+    crash_streak_limit: int = CRASH_STREAK,
+    compact_chars: int = COMPACT_CHARS,
+    chat=chat_code,
 ) -> tuple[dict | None, bool, list[dict]]:
     """Returns ({key, code} or None, verified?, round history). Maintain mode
     (require_key set) pins KEY to the registered parser being evolved;
     task_message replaces the drafted task template (it embeds the baseline
-    source and its gate verdict)."""
+    source and its gate verdict). Loop policy is advisory-only: probes are
+    always allowed; nudges (commit, crash-streak, look-coverage) ride along
+    with the normal feedback."""
     frames = frames_for(pdfs, workdir)
     first = frames["statements"][0]
     trace.log(
@@ -738,6 +868,9 @@ def draft_by_repl(
     consecutive_probes = 0
     probes_done = 0
     tail_seen = False
+    top_seen = False
+    look_hint_done = False
+    crash_streak = 0
     total_lines = len(first["lines"])
     chars_in = 0
     chars_out = 0
@@ -757,11 +890,12 @@ def draft_by_repl(
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": task},
                 ]
-            saved = compact_messages(messages)
+            saved = compact_messages(messages, threshold=compact_chars,
+                                     chat=chat, trace=trace)
             if saved > 0:
-                trace.log(f"round {round_number} context compacted", f"{saved} chars elided")
+                trace.log(f"round {round_number} context compacted", f"{saved} chars saved")
             try:
-                raw = chat_code(messages)
+                raw = chat(messages)
             except RuntimeError as error:
                 trace.log(f"round {round_number} chat failed", str(error))
                 print(f"round {round_number}: chat failed, skipping ({str(error)[:90]})")
@@ -800,96 +934,24 @@ def draft_by_repl(
             history.append({"round": round_number, "outcome": f"lint: {violation}"})
             continue
 
-        # Burner probe: looking turns. Discarded by design —
-        # nothing is distilled, nothing is evaluated, and convergence still
-        # requires one complete script through the full engine gate.
+        # Burner probe: looking turns, allowed at any time — probing is the
+        # fastest way to learn the layout. Discarded by design: nothing is
+        # distilled, nothing is evaluated, and convergence still requires one
+        # complete script through the full engine gate.
         is_probe = code.lstrip().splitlines()[0].strip().lower() == "# probe"
         (workdir / f"round_{round_number}.py").write_text(code)
 
-        # Commit latch: once 90% of the turn budget is spent, probes close
-        # for good — the run must converge on full scripts. The look-gate is
-        # waived from the same point so a model that never probed cannot
-        # deadlock between "probe first" and "probes are closed".
-        commit_mode = round_number >= int(rounds * 0.9)
-
-        # Handling gate: the first full script is only accepted after the
-        # model has actually LOOKED — at least one probe, and at least one
-        # probe that showed the END of the statement (detectable: show()
-        # prints line indices, so a high index in probe stdout means the tail
-        # was on screen). Small models guess stop words unless forced to read
-        # them; this is the forcing. Waived once the probe budget is spent —
-        # otherwise bounces and the gate deadlock (the model can neither
-        # probe again nor commit).
-        budget_spent = (max_probes is not None and probes_done >= max_probes)
-        if (
-            not is_probe
-            and not commit_mode
-            and not budget_spent
-            and canned_script is None
-            and enforce_look_gate
-            and (probes_done < 1 or not tail_seen)
-        ):
-            if probes_done < 1:
-                instruction = (
-                    "Return a burner probe (first line exactly '# probe') "
-                    "printing the TOP of the statement: "
-                    "pl.show(pl.load_frames()[0]['lines'], 12)."
-                )
-                reason = "no probe yet"
-            else:
-                instruction = (
-                    "Your probes have not shown the END of the statement — "
-                    "the words that terminate the transaction table live "
-                    "there. Return a burner probe (first line '# probe'): "
-                    "pl.show(lines, 6, len(lines) - 6), and READ what "
-                    "follows the last transaction row."
-                )
-                reason = "tail not probed"
-            feedback = (
-                "NOT ACCEPTED — look before you write. Small models that "
-                "guess labels and stop words instead of reading them fail; "
-                f"{instruction}"
-            )
-            trace.log(f"round {round_number} full script gated", f"{reason}\n" + feedback)
-            print(f"round {round_number}: full script gated ({reason})")
-            messages.append({"role": "user", "content": feedback})
-            history.append(
-                {"round": round_number, "outcome": f"full script gated: {reason}"}
-            )
-            continue
-        # Probe budget: small models ignore the 90% warning and probe forever
-        # (the local 4B spent 29 of 30 turns probing, one full script, zero
-        # gate feedback). With a budget set, probes beyond it are BOUNCED —
-        # not executed — with commit-now feedback.
-        if (is_probe and max_probes is not None and probes_done >= max_probes
-                and canned_script is None):
-            feedback = (
-                f"PROBE BUDGET ({max_probes}) EXHAUSTED — you have seen "
-                "enough. Return the COMPLETE full script now: KEY + def "
-                "parse(frames) + the demo guarded by if __name__ == "
-                "'__main__'. It does not need to be perfect; the gate runs "
-                "it, and the error names exactly what to fix next round."
-            )
-            messages.append({"role": "user", "content": feedback})
-            history.append(
-                {"round": round_number, "outcome": f"probe bounced (budget {max_probes})"}
-            )
-            trace.log(f"round {round_number} probe bounced", "budget exhausted")
-            continue
         if is_probe:
             consecutive_probes += 1
             probes_done += 1
             outcome = run_script(workdir, f"round_{round_number}")
-            # Tail coverage: show() prints zero-padded line indices at the
-            # start of each row; an index near the document end means the
-            # stop-word region was actually displayed.
-            shown = [
-                int(index)
-                for index in re.findall(
-                    r"^(\d{1,4}) [\[{]", outcome["stdout"], re.M)
-            ]
-            if shown and max(shown) >= total_lines - 8:
-                tail_seen = True
+            # Look coverage: render()/show() print zero-padded line indices
+            # at the start of each row; an index near the document ends means
+            # that region was actually displayed.
+            shown = shown_indices(outcome["stdout"])
+            if shown:
+                tail_seen = tail_seen or max(shown) >= total_lines - 8
+                top_seen = top_seen or min(shown) <= 8
             trace.log(
                 f"round {round_number} probe output",
                 f"exit {outcome['returncode']}\n{outcome['stdout'][-4000:]}"
@@ -899,13 +961,8 @@ def draft_by_repl(
             print(f"round {round_number}: {verdict} (burner, #{consecutive_probes})")
             history.append({"round": round_number, "outcome": f"{verdict} (burner)"})
             parts = [script_feedback(outcome)]
-            warning = (
-                "WARNING: 90% of the turns are used — probes cannot converge "
-                "the run. Return the COMPLETE full script next (keep needed "
-                "prints inside it, verify with pl.reconcile)."
-                if commit_mode
-                else "Probe again, or return the complete full script."
-            )
+            warning = commit_nudge(round_number, rounds, probes_done, max_probes) \
+                or "Probe again, or return the complete full script."
             parts.append(
                 "End of probe (discarded — nothing was distilled). " + warning
             )
@@ -931,6 +988,15 @@ def draft_by_repl(
                 continue
 
         outcome = run_script(workdir, f"round_{round_number}")
+        crashed = outcome["returncode"] != 0
+        # Crash streak: consecutive full-script crashes. Probes never reset
+        # it — probing is the desired response to the advisory. Any full
+        # script that runs clean (gate verdict or not) resets it.
+        crash_streak = crash_streak + 1 if crashed else 0
+        shown = shown_indices(outcome["stdout"])
+        if shown:
+            tail_seen = tail_seen or max(shown) >= total_lines - 8
+            top_seen = top_seen or min(shown) <= 8
         trace.log(
             f"round {round_number} script output",
             f"exit {outcome['returncode']} in {outcome['elapsed']:.1f}s\n"
@@ -991,6 +1057,19 @@ def draft_by_repl(
                 "under if __name__ == '__main__'."
             )
         parts.append(script_feedback(outcome))
+        # Advisories ride along with the feedback; they never block a round.
+        streak_note = crash_streak_advisory(
+            crash_streak, crash_streak_limit,
+            crash_site(outcome["stderr"], f"round_{round_number}.py")
+            if crashed else None)
+        if streak_note:
+            parts.append(streak_note)
+            trace.line(f"round {round_number}: crash-streak advisory "
+                       f"({crash_streak} in a row)")
+        look_note = look_advisory(top_seen, tail_seen, look_hint_done)
+        if look_note:
+            look_hint_done = True
+            parts.append(look_note)
         feedback = "\n\n".join(parts) + "\n\nReturn the complete corrected script."
         chars_in += len(feedback)
         trace.log(f"round {round_number} feedback sent", feedback)
@@ -1051,9 +1130,25 @@ def main() -> int:
         "--max-probes",
         type=int,
         default=None,
-        help="burner-probe budget; probes beyond it are bounced with "
-             "commit-now feedback (small models ignore the 90%% warning and "
-             "probe forever; default: unlimited)",
+        help="advisory probe budget: past it (and from 90%% of turns) probe "
+             "feedback carries a commit-now note — probes are never bounced "
+             "(default: unlimited)",
+    )
+    cli.add_argument(
+        "--crash-streak",
+        type=int,
+        default=CRASH_STREAK,
+        help="after this many consecutive full-script crashes, the feedback "
+             "gains a probe-suggestion naming the failing function "
+             "(default: %(default)s)",
+    )
+    cli.add_argument(
+        "--compact-chars",
+        type=int,
+        default=COMPACT_CHARS,
+        help="summarize (not truncate) the conversation once it exceeds this "
+             "many chars; system+task and the last 3 assistant turns stay "
+             "verbatim (default: %(default)s)",
     )
     args = cli.parse_args()
 
@@ -1078,7 +1173,6 @@ def main() -> int:
     # hand the model the source + per-statement verdict as its starting point.
     task_message = None
     require_key = None
-    look_gate = True
     baseline = None
     pins = None
     if args.key:
@@ -1121,14 +1215,13 @@ def main() -> int:
         )
         system += "\n\n" + MAINTAIN_ADDENDUM
         require_key = args.key
-        look_gate = False  # the baseline IS the looked-at evidence; probe at will
 
     artifact, verified, history = draft_by_repl(
         args.pdfs, workdir, args.rounds, trace, canned_script=args.script,
         system_prompt=system, task_template=template,
         task_message=task_message, require_key=require_key,
-        enforce_look_gate=look_gate, max_probes=args.max_probes,
-        pins=pins,
+        max_probes=args.max_probes, pins=pins,
+        crash_streak_limit=args.crash_streak, compact_chars=args.compact_chars,
     )
     if artifact is None or not verified:
         trace.log("result", f"FAILED ({'no artifact' if artifact is None else 'not verified'})")

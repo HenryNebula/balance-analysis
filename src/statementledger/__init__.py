@@ -32,10 +32,11 @@ import tempfile
 from pathlib import Path
 
 from statementledger.engine import (TOL, CANONICAL_FIELDS, VerificationError,
-                                    evaluate, hint_for, items, ledgers_of,
-                                    line_text, parse_amount, parse_date,
-                                    reconcile, reconcile_statement, show,
-                                    validate)
+                                    anchor_value, evaluate, grep, hint_for,
+                                    items, ledgers_of, line_text,
+                                    parse_amount, parse_date, reconcile,
+                                    reconcile_statement, regions, render,
+                                    render_table, table, validate)
 from statementledger.frames import frames_for, load_frames
 from statementledger.registry import keys, load_module
 
@@ -47,7 +48,9 @@ __all__ = [
     "frames_for", "load_frames",
     # engine
     "parse_amount", "parse_date", "reconcile", "reconcile_statement",
-    "validate", "evaluate", "hint_for", "line_text", "show", "items",
+    "validate", "evaluate", "hint_for", "line_text", "items",
+    "render", "grep", "regions",                      # layout views
+    "table", "render_table", "anchor_value",          # ledger grid
     "ledgers_of", "VerificationError", "CANONICAL_FIELDS", "TOL",
     "__version__",
 ]

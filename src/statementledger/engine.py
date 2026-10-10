@@ -42,23 +42,85 @@ def line_text(line: dict) -> str:
     return " ".join(item[0] for item in line["items"])
 
 
-def show(lines: list[dict], n: int = 15, start: int = 0) -> None:
-    """Print lines[start:start+n] in layout-dump form, with line indices:
+def render(lines: list[dict], n: int = 40, start: int = 0,
+           width: int = 110) -> None:
+    """Print lines[start:start+n] as a monospace text wall that preserves
+    x positions — each page normalized to `width` columns:
 
         [Page 0]
-        038 ["15 Jan",77,113] ["Transaction 29",149,229] ["1,122.33",282,329]
+        038 | Date   Description            Debit      Credit     Balance
+        039 | 01 Feb  STORE 482 PURCHASE    112.33                9,844.21
 
     Line indices are zero-based offsets into `lines` — the same indices you
-    slice with lines[a:b]. Probe the TOP (start=0) and the END
+    slice with lines[a:b]. Items are placed at a character column derived
+    from their x1 (per-page scale), right-to-left so the money/date columns
+    on the right win collisions and long descriptions clip with "…" instead
+    of mashing into them. Positions are approximations; for exact geometry
+    read the raw [text, x1, x2] triples in lines[i]["items"]. Slice, don't
+    dump: the interesting regions are the TOP (start=0) and the END
     (start=len(lines)-n; the words that stop the table live there)."""
+    page_right: dict[int, int] = {}
+    for line in lines:
+        for _text, _x1, x2 in line["items"]:
+            page_right[line["page"]] = max(page_right.get(line["page"], 0), x2)
     page = None
     for index in range(start, min(start + n, len(lines))):
         line = lines[index]
         if line["page"] != page:
             page = line["page"]
             print(f"[Page {page}]")
-        items = " ".join(f'["{t}",{x1},{x2}]' for t, x1, x2 in line["items"])
-        print(f"{index:03d} {items}")
+        scale = width / max(page_right.get(page, 0) or 600, 1)
+        buffer = [" "] * width
+        placed: list[int] = []  # start columns of items already placed
+        for text, x1, _x2 in reversed(line["items"]):
+            col = min(int(round(x1 * scale)), width - 1)
+            limit = min(placed) if placed else width  # nearest right neighbor
+            room = limit - col - 1  # one blank separator column
+            if room <= 0:
+                continue  # a rightward item (money wins) covers this span
+            shown = text if len(text) <= room else text[: room - 1] + "…"
+            buffer[col: col + len(shown)] = list(shown)
+            placed.append(col)
+        print(f"{index:03d} | " + "".join(buffer).rstrip())
+
+
+def grep(lines: list[dict], pattern: str, regex: bool = False,
+         context: int = 0) -> None:
+    """Which lines hold a term — try keywords before guessing labels:
+
+        grep(lines, "balance") ->
+            003: Opening balance: $25,000.00 CR
+            007: Closing balance: $24,118.09
+            2 match(es)
+
+    Substring match on each line's text, case-insensitive (label hunting is
+    case-noisy); regex=True switches to a case-insensitive re.search —
+    write [A-Z] classes when case matters. context=k prints up to k
+    neighboring lines around each hit, "--" between disjoint groups.
+    Prints, returns None: a probe tool — parse() wants anchor_value."""
+    if regex:
+        def matches(text: str) -> bool:
+            return re.search(pattern, text, re.I) is not None
+    else:
+        needle = pattern.lower()
+
+        def matches(text: str) -> bool:
+            return needle in text.lower()
+    hits = [i for i, line in enumerate(lines) if matches(line_text(line))]
+    if not hits:
+        print(f"0 match(es) for {pattern!r}")
+        return
+    wanted: set[int] = set()
+    for hit in hits:
+        wanted.update(range(max(0, hit - context),
+                            min(len(lines), hit + context + 1)))
+    previous = None
+    for index in sorted(wanted):
+        if previous is not None and index > previous + 1:
+            print("--")
+        print(f"{index:03d}: {line_text(lines[index])}")
+        previous = index
+    print(f"{len(hits)} match(es)")
 
 
 def items(frames: dict) -> list[dict]:
@@ -182,6 +244,342 @@ def parse_date(token: str, default_year: int | None = None) -> str | None:
     if year is None:
         return None
     return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+# --- The ledger grid (geometry solved once, not per parser) ---------------------
+
+
+COLUMN_WORD_RE = re.compile(
+    r"^(date|posted|description|details|detail|amount|balance|debit|credit|"
+    r"withdrawals?|deposits?|type|ref|reference|no\.?|chq|cheque|value)$", re.I)
+
+
+def _find_header(lines: list[dict]) -> dict | None:
+    """The most header-like line: most items that are exactly common column
+    words (Date, Description, Amount, Balance, Debit, Credit, ...)."""
+    best, best_score = None, 0
+    for line in lines:
+        score = sum(1 for item in line["items"]
+                    if COLUMN_WORD_RE.match(item[0].strip()))
+        if score >= 2 and score > best_score:
+            best, best_score = line, score
+    return best
+
+
+def _page_furniture(lines: list[dict]) -> set[int]:
+    """Indexes of repeated page furniture — lines whose full text recurs at
+    the same y on two or more pages (running headers/footers). The grid
+    drops these or they masquerade as continuation rows and pollute the
+    description/date columns."""
+    seen: dict[tuple[str, int], set[int]] = {}
+    by_key: dict[tuple[str, int], list[int]] = {}
+    for index, line in enumerate(lines):
+        key = (line_text(line), line["y"])
+        seen.setdefault(key, set()).add(line["page"])
+        by_key.setdefault(key, []).append(index)
+    return {index for key, pages in seen.items() if len(pages) >= 2
+            for index in by_key[key]}
+
+
+def _has_money(cell: str) -> bool:
+    return any(parse_amount(token) is not None for token in cell.split())
+
+
+def _has_date(cell: str) -> bool:
+    return any(parse_date(token) is not None for token in cell.split())
+
+
+def table(lines: list[dict], header: dict | None = None, start: int | None = None,
+          stop: int | None = None, stop_terms: tuple[str, ...] | list[str] = (),
+          sections: dict[str, str] | None = None,
+          merge_continuations: bool = True) -> tuple[list[str], list[dict]]:
+    """Materialize the ledger grid: (columns, rows) — the geometry solver.
+
+        columns, rows = table(lines, stop_terms=("Transactions stop",))
+        -> (["Date", "Description", "Debit", "Credit", "Balance"],
+            [{"Date": "01 Feb", "Description": "STORE 482 PURCHASE",
+              "Debit": "112.33", "Credit": "", "Balance": "9,844.21",
+              "_line": 8}, ...])
+
+    - header: the header line (auto-detected when omitted; pass lines[i]
+      yourself when the detector misses — a line whose items are exactly
+      common column words)
+    - start/stop: data line range (default: after the header, to the first
+      line containing any stop term, else end of lines)
+    - sections: {label: marker} — every row carries "_section" set to the
+      label of the last marker line at or above it (sectioned statements:
+      withdrawals/deposits blocks over one shared column set)
+    - merge_continuations: rows with no date and no money are wrapped
+      descriptions — they merge into the NEXT row (printers set the wrap
+      line above the money row); a trailing orphan stays its own row.
+      Banks that wrap BELOW the money row differ: audit with "_line".
+
+    Column boundaries are the midpoints between adjacent header item
+    centers, edge columns open-ended — the grid a human sees. Page
+    furniture is dropped; every row carries "_line" (its index into lines)
+    so merges stay auditable. Never rebuild this grid by hand in parse()."""
+    header = header or _find_header(lines)
+    if header is None:
+        raise ValueError(
+            "no header row found — pass header=lines[i] for the line whose "
+            "items are the column words (find it with grep(lines, 'date'))")
+    heads = sorted(((text.strip(), (x1 + x2) / 2)
+                    for text, x1, x2 in header["items"]), key=lambda h: h[1])
+    columns = [text for text, _ in heads]
+    centers = [center for _, center in heads]
+    bounds = [(float("-inf") if i == 0 else (centers[i - 1] + centers[i]) / 2,
+               float("inf") if i == len(centers) - 1
+               else (centers[i + 1] + centers[i]) / 2)
+              for i in range(len(centers))]
+
+    first = start if start is not None else lines.index(header) + 1
+    last = stop if stop is not None else len(lines)
+    if stop_terms and stop is None:
+        for index in range(first, len(lines)):
+            if any(term in line_text(lines[index]) for term in stop_terms):
+                last = min(last, index)
+                break
+
+    section_of: str | None = None
+    furniture = _page_furniture(lines)
+    rows: list[dict] = []
+    for index in range(first, min(last, len(lines))):
+        if index in furniture:
+            continue
+        text = line_text(lines[index])
+        if sections:
+            for label, marker in sections.items():
+                if marker in text:
+                    section_of = label
+                    break
+        row = {column: "" for column in columns}
+        for item_text, x1, x2 in lines[index]["items"]:
+            center = (x1 + x2) / 2
+            for column, (low, high) in zip(columns, bounds):
+                if low <= center < high:
+                    row[column] = (row[column] + " " + item_text).strip()
+                    break
+        row["_line"] = index
+        if sections:
+            row["_section"] = section_of
+        if not any(row[column] for column in columns):
+            continue  # blank line
+        rows.append(row)
+
+    if not merge_continuations:
+        return columns, rows
+    desc = next((c for c in columns
+                 if "desc" in c.lower() or "detail" in c.lower()), None)
+    if desc is None:
+        return columns, rows
+
+    def anchored(row: dict) -> bool:
+        return any(_has_money(row[c]) or _has_date(row[c]) for c in columns)
+
+    merged: list[dict] = []
+    pending: dict | None = None  # wrap lines awaiting their money row
+    for row in rows:
+        if not anchored(row) and row[desc]:
+            if pending is None:  # consecutive wraps chain onto the first
+                pending = dict(row)
+            else:
+                pending[desc] = (pending[desc] + " " + row[desc]).strip()
+                for column in columns:  # keep any stray non-description content
+                    if column != desc and row[column]:
+                        pending[column] = (pending[column] + " "
+                                           + row[column]).strip()
+            continue
+        if pending is not None:
+            row[desc] = (pending[desc] + " " + row[desc]).strip()
+            for column in columns:
+                if column != desc and pending.get(column):
+                    row[column] = (pending[column] + " " + row[column]).strip()
+            pending = None
+        merged.append(row)
+    if pending is not None:  # trailing orphan: no money row ever followed
+        merged.append(pending)
+    return columns, merged
+
+
+def render_table(columns: list[str], rows: list[dict],
+                 width: int = 28) -> None:
+    """Print the materialized grid as an aligned table — read it like a page:
+
+        Date   | Description           | Debit    | Balance
+        ------+-----------------------+----------+---------
+        01 Feb | STORE 482 PURCHASE    | 112.33   | 9,844.21
+
+    Empty columns are omitted; cells wider than `width` chars are capped
+    with "…". Pair with table(): columns, rows = table(...), then
+    render_table(columns, rows)."""
+    def cell(row: dict, column: str) -> str:
+        text = str(row.get(column, ""))
+        return (text[: width - 1] + "…") if len(text) > width else text
+
+    cols = [c for c in columns if any(str(r.get(c, "")).strip() for r in rows)] + [
+        c for c in ("_section",) if any(r.get("_section") for r in rows)]
+    sizes = [max(len(c), *(len(cell(r, c)) for r in rows)) if rows else len(c)
+             for c in cols]
+    print(" | ".join(c.ljust(sizes[i]) for i, c in enumerate(cols)))
+    print("-+-".join("-" * s for s in sizes))
+    for row in rows:
+        print(" | ".join(cell(row, c).ljust(sizes[i]) for i, c in enumerate(cols)))
+
+
+def _values_on_line(line: dict, term: str) -> list[str] | None:
+    """Item texts strictly right of the item containing `term`, or None."""
+    for text, x1, _x2 in line["items"]:
+        if term.lower() in text.lower():
+            right = [t for t, a, _b in line["items"] if a > x1]
+            if right:
+                return right
+    return None
+
+
+def anchor_value(lines: list[dict], term: str, index: int = 0) -> str:
+    """The printed value beside a label — the beside() every parser needs:
+
+        anchor_value(lines, "Account No:") -> "0123 4567 8901"
+
+    The index-th (default first) line whose text contains `term`
+    (case-insensitive) contributes every item RIGHT of the label item —
+    same-line rightward, the y-alignment the printer itself used. Raises
+    ValueError quoting the printed line when the label carries nothing
+    beside it, and saying the term appears nowhere otherwise: grep()
+    first when unsure what the label actually says."""
+    seen = 0
+    quoted = None
+    for line in lines:
+        values = _values_on_line(line, term)
+        if values is None:
+            if quoted is None and term.lower() in line_text(line).lower():
+                quoted = line_text(line)
+            continue
+        if seen == index:
+            return " ".join(values)
+        seen += 1
+    if quoted is not None:
+        raise ValueError(
+            f"{term!r} is printed with nothing beside it: {quoted!r}")
+    raise ValueError(f"label not printed anywhere: {term!r}")
+
+
+def regions(lines: list[dict], window: int = 6) -> list[dict]:
+    """Indicative layout map — where the table/form/prose blocks sit:
+
+        regions(lines) ->
+            lines 000-005  FORM    5/6 label: value (e.g. "Opening balance: ...")
+            lines 007-040  TABLE   columns x≈96,180,310,384 · 79% money · header at 007
+            lines 041-042  PROSE   7+ words/line, no money
+
+    Heuristic, NOT truth: windows of consecutive non-furniture lines vote on
+    money/date density, recurrent x-centers (the column signature), label:
+    value shape, and word count; majority wins per line. Bare digit runs
+    (reference numbers) read as money — the ratios are indicative. Use the
+    map to aim render()/grep()/table() at the right slice, never as a
+    verdict. Returns the region dicts and prints the report."""
+    furniture = _page_furniture(lines)
+    active = [i for i in range(len(lines)) if i not in furniture]
+    if not active:
+        print("no non-furniture lines")
+        return []
+    need = max(3, (window + 1) // 2)
+
+    stats = []
+    for i in active:
+        tokens = line_text(lines[i]).split()
+        first = lines[i]["items"][0][0].rstrip() if lines[i]["items"] else ""
+        stats.append({
+            "money": any(parse_amount(t) is not None for t in tokens),
+            "dated": any(parse_date(t) is not None for t in tokens),
+            "colon": first.endswith(":") and len(lines[i]["items"]) >= 2,
+            "words": len(tokens),
+            "bins": {int(((x1 + x2) / 2) // 16) for _t, x1, x2 in lines[i]["items"]},
+        })
+
+    def window_class(chunk: list[dict]) -> tuple[str, dict]:
+        counts: dict[int, int] = {}
+        for stat in chunk:
+            for b in stat["bins"]:
+                counts[b] = counts.get(b, 0) + 1
+        recurrent = {b for b, n in counts.items() if n >= need}
+        evidence = {
+            "money": round(sum(s["money"] for s in chunk) / len(chunk)),
+            "dated": round(sum(s["dated"] for s in chunk) / len(chunk)),
+            "colon": round(sum(s["colon"] for s in chunk) / len(chunk)),
+            "columns": sorted(recurrent),
+            "words": sum(s["words"] for s in chunk) / len(chunk),
+        }
+        if len(recurrent) >= 3 and (evidence["money"] >= 0.25
+                                    or evidence["dated"] >= 0.5):
+            kind = "table"
+        elif evidence["colon"] >= 0.5:
+            kind = "form"
+        elif evidence["words"] >= 7 and evidence["money"] <= 0.2 \
+                and len(recurrent) <= 1:
+            kind = "prose"
+        else:
+            kind = "mixed"
+        return kind, evidence
+
+    votes: dict[int, dict[str, int]] = {i: {} for i in active}
+    best: dict[int, dict] = {i: {} for i in active}
+    for offset in range(len(active)):
+        chunk = stats[offset: offset + window]
+        if not chunk:
+            break
+        kind, evidence = window_class(chunk)
+        for stat_index in range(offset, min(offset + window, len(active))):
+            line_index = active[stat_index]
+            votes[line_index][kind] = votes[line_index].get(kind, 0) + 1
+            if len(evidence["columns"]) > len(best[line_index].get("columns", ())):
+                best[line_index] = evidence
+
+    classified = []
+    precedence = ("table", "form", "prose", "mixed")  # ties go specific-first
+    for i in active:
+        kind = max(votes[i].items(),
+                   key=lambda kv: (kv[1], -precedence.index(kv[0])))[0]
+        classified.append((i, kind))
+
+    merged: list[dict] = []
+    for i, kind in classified:
+        if merged and (merged[-1]["kind"] == kind):
+            merged[-1]["stop"] = i
+        else:
+            merged.append({"start": i, "stop": i, "kind": kind})
+    # single-line runs absorb into the previous region (boundary noise)
+    for region_index in range(len(merged) - 1, 0, -1):
+        if merged[region_index]["start"] == merged[region_index]["stop"]:
+            merged[region_index - 1]["stop"] = merged[region_index]["stop"]
+            merged.pop(region_index)
+
+    for region in merged:
+        region.update(best[region["start"]])
+        region["sample"] = line_text(lines[region["start"]])
+        if region["kind"] == "table":
+            header = _find_header(lines[region["start"]: region["stop"] + 1])
+            region["header"] = (region["start"] + lines[region["start"]:
+                                region["stop"] + 1].index(header)) if header else None
+
+    for region in merged:
+        label = region["kind"].upper()
+        detail = ""
+        if region["kind"] == "form":
+            detail = f'{region["colon"]:.0%} label: value (e.g. {region["sample"][:40]!r})'
+        elif region["kind"] == "table":
+            xs = ", ".join(str(b * 16 + 8) for b in region["columns"][:6])
+            detail = (f'columns x≈{xs} · {region["money"]:.0%} money'
+                      + (f' · header at {region["header"]}'
+                         if region.get("header") is not None else ""))
+        elif region["kind"] == "prose":
+            detail = f'{region["words"]:.0f}+ words/line, no money'
+        print(f'lines {region["start"]:03d}-{region["stop"]:03d}  '
+              f'{label:<6}  {detail}')
+    if furniture:
+        print(f"furniture: {sorted(furniture)} — repeated at the same y "
+              "on 2+ pages")
+    return merged
 
 
 def reconcile(amounts: list, opening, closing, balances: list | None = None,
