@@ -55,24 +55,26 @@ product, keyed `cc__bank__product__n` (country, bank, product, version):
 `sl.parse(pdf)` without a key tries every registered parser and returns the
 first that verifies.
 
-## Adding a bank: the distill harness
+## Adding a bank: the distill agent
 
 You do not write parsers by hand (though you can — the registry modules are
-~60 lines each). `tools/distill_harness.py` runs a REPL loop with an LLM
-that probes the statement's frames, drafts `parse()`, and gates every round
-on the same arithmetic — nothing is registered until it reconciles:
+~60 lines each). `tools/distill_agent.py` runs a tool-calling agent that
+explores the statement (render/grep/table/python tools), builds `parser.py`
+step by step (write/edit tools), and gates it on the same arithmetic
+(`run`) — a VERIFIED run registers the parser; nothing ships until it
+reconciles:
 
 ```console
-$ uv run python tools/distill_harness.py newbank_statement.pdf --max-probes 8
+$ uv run python tools/distill_agent.py newbank_statement.pdf
 ...
-$ uv run python tools/distill_harness.py --key us__newbank__checking__1 \
+$ uv run python tools/distill_agent.py --key us__newbank__checking__1 \
       january.pdf february.pdf   # MAINTAIN: evolve a registered parser
 ```
 
 Configuration via `STATEMENTLEDGER_LLM_*` (copy `.env.example` to `.env`);
 any OpenAI-compatible endpoint works, including a local llama-server.
-Probes run in a sandboxed child (no network, rlimits, transcription lint),
-so the model can look but not smuggle statement data into code.
+Sandboxed execution (no network, rlimits) and a transcription lint keep the
+model honest: it can look, but not smuggle statement data into code.
 
 ## Development
 
