@@ -19,6 +19,7 @@ packages = ["src/statementledger"]
 
 [dependency-groups]
 dev = [
+    "jinja2>=3.1.6",
     "pikepdf>=10.16.0",
     "pytest>=8",
     "reportlab>=4",

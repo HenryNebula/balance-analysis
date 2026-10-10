@@ -43,6 +43,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
+
 from envloader import load_env
 
 load_env()
@@ -66,157 +68,25 @@ COMPACT_CHARS = int(os.environ.get("STATEMENTLEDGER_COMPACT_CHARS", "120000"))
 # (compaction at 120k chars ≈ 30k tokens: lands ~round 8 of a 30-round run,
 # re-triggers every few rounds; lower it for small-context local models)
 
-PY_SYSTEM_PROMPT = """You write bank-statement parsers in plain Python. A
-statement arrives as FRAMES — extracted layout:
+# --- Prompts (jinja templates in tools/prompts/) --------------------------------
 
-    {"name": ..., "lines": [{"page": int, "y": int, "items": [[text, x1, x2], ...]}]}
-
-y grows downward; items are in print order. A ledger is geometry: the header
-row names the columns, an item's x-center falls under one of them, and label
-values sit on the same line as their label.
-
-Deliverable — a complete parser module. Nothing else persists:
-
-    KEY = "us__bank__product__1"          # registry key, lowercase
-    def parse(frames) -> dict:            # pure: derives everything from frames
-        return {
-            "bank_name": str, "account_number": str,
-            "opening_balance": float, "closing_balance": float,
-            "transactions": [
-                {"date": "YYYY-MM-DD" or None,   # yearless: year from the period
-                 "description": str,
-                 "amount": float,                # SIGNED: credits +, debits -
-                 "balance": float or None},      # printed running balance
-            ],
-            # optional, when the statement prints section totals — each an
-            # independent check: "positive" = Σ positive amounts,
-            # "negative" = Σ |negatives|, "all" = plain sum:
-            "totals": [{"label": "Total deposits", "kind": "positive",
-                        "value": 1234.56}],
-        }
-
-Rules:
-- parse() imports stdlib + statementledger only; no files, network,
-  processes; no try/except — errors must crash loudly.
-- No literals for printed amounts, dates, or descriptions (the lint rejects
-  them). Label terms and column words are fine.
-- Derive columns, labels, and stop terms from each statement's own words —
-  never one month's geometry.
-- Presentation: a date-less row inherits the previous date; a balance-less
-  row gets the running balance (opening + Σ amounts so far, rounded to 2dp
-  at every step — money is exactly 2dp).
-
-Sandbox — import statementledger as pl; the docstrings are the manual
-(print(pl.table.__doc__), help(pl)):
-- pl.load_frames() -> the frames LIST; parse() receives ONE element of it.
-- THE GRID IS SOLVED — never rebuild the geometry by hand:
-  pl.table(lines, stop_terms=(...)) -> (columns, rows): header-midpoint
-  columns, furniture dropped, wrapped descriptions merged, _line per row,
-  sections={label: marker} for blocks; pl.render_table(columns, rows)
-  prints it. Pass header=lines[i] when auto-detection misses.
-- pl.render(lines, n, start) — the page as an x-preserving text wall with
-  line indices (same ones you slice lines[a:b] with); pl.grep(lines,
-  "balance", context=2) — which lines hold a term; pl.regions(lines) —
-  indicative table/form/prose map.
-- pl.anchor_value(lines, "Account No:") — value beside a label; never
-  hand-roll a beside().
-- pl.items(frames) -> per-item rows with cx.
-- pl.parse_amount("$1,234.56 DR") -> signed float (CR +, DR -, parens
-  negate); None = no money here, NOT zero. Custom regex is fine for exotic
-  formats if unreadable stays None. pl.parse_date("05 Mar",
-  default_year=y) -> ISO date or None.
-- pl.reconcile(amounts, opening, closing, balances=None) — must print OK
-  before you finish.
-
-Verification is arithmetic: parse() runs on EVERY statement; each must
-validate and reconcile (opening + Σ amounts == closing; printed balances
-track; bound totals match — they catch dropped offsetting pairs and sign
-flips that still balance). Gate errors are remedial: crashes carry a HINT,
-schema errors name the row, reconcile failures name the divergence. End
-with a demo under if __name__ == "__main__": parse, print, reconcile.
-"""
-
-PY_CONTRACT = """Contract for every response:
-- ONE complete script in a single ```python fence: imports, KEY, def
-  parse(frames), demo under if __name__ == "__main__".
-- KEY is cc__bank__product__n, lowercase, from THE STATEMENT's country,
-  printed bank name, and product — never bare "bank"/"product"/"demo".
-- One account: the canonical dict. Several accounts in one PDF (repeated
-  headers, each with own balances): a LIST of dicts, one per account, all
-  covered — a single ledger over a multi-account PDF is partial coverage
-  the gate cannot see.
-- Under ~70 lines. No try/except — the traceback comes back verbatim.
-- Literals only for label terms / header words — never amounts, dates,
-  descriptions.
-- READ amounts from the amount columns; never compute them from balances
-  (a tautology the gate cannot see). Bind printed activity totals into
-  totals[].
-- Probes (first line "# probe") run any time and are discarded — only a
-  full script converges the run (past 90% of turns you are reminded).
-- Read the END of the statement before trusting a stop word; grep instead
-  of guessing a label.
-- Never finish while your own pl.reconcile prints FAIL."""
-
-PY_EXAMPLE = '''import re
-
-import statementledger as pl
-
-KEY = "us__demo__checking__1"
+PROMPT_DIR = Path(__file__).parent / "prompts"
+_prompt_env = Environment(
+    loader=FileSystemLoader(PROMPT_DIR), autoescape=False,
+    trim_blocks=True, lstrip_blocks=True, keep_trailing_newline=True,
+    undefined=StrictUndefined,
+)
 
 
-def parse(frames):
-    lines = frames["lines"]
-
-    account = re.search(r"(\\d[\\d ]+)",
-                        pl.anchor_value(lines, "Account No:")).group(1).strip()
-    opening = pl.parse_amount(pl.anchor_value(lines, "Beginning Balance"))
-    closing = pl.parse_amount(pl.anchor_value(lines, "Ending Balance"))
-    year = int(re.search(r"\\b(19|20)\\d{2}\\b",
-                         pl.anchor_value(lines, "Statement Period")).group())
-
-    columns, rows = pl.table(lines, stop_terms=("End of activity",))
-    transactions, pending_date = [], None
-    for row in rows:                       # wrapped descriptions are merged
-        date = pl.parse_date(row.get("Date", ""), default_year=year)
-        amount = pl.parse_amount(row.get("Amount", ""), strict_grouping=True)
-        if amount is None:                 # no money: not a transaction row
-            pending_date = date or pending_date
-            continue
-        transactions.append({
-            "date": date or pending_date,
-            "description": row.get("Description", ""),
-            "amount": amount,
-            "balance": pl.parse_amount(row.get("Balance", "")),
-        })
-        pending_date = None
-
-    return {"bank_name": pl.anchor_value(lines, "Bank"),
-            "account_number": account,
-            "opening_balance": opening, "closing_balance": closing,
-            "transactions": transactions}
+def render_prompt(template: str, **context) -> str:
+    """Render tools/prompts/<template>. StrictUndefined — a missing variable
+    or template typo fails loudly instead of shipping a half-empty prompt."""
+    return _prompt_env.get_template(template).render(**context)
 
 
-if __name__ == "__main__":
-    statement = parse(pl.load_frames()[0])
-    print(statement["account_number"], statement["opening_balance"],
-          "->", statement["closing_balance"])
-    for txn in statement["transactions"][:5]:
-        print(txn)
-    pl.reconcile([t["amount"] for t in statement["transactions"]],
-                 statement["opening_balance"], statement["closing_balance"],
-                 [t["balance"] for t in statement["transactions"]])
-'''
-
-PY_TASK_TEMPLATE = """Statement to parse: {name} ({pages} pages, {lines} lines).
-frames.json in cwd; pl.load_frames() reads it.
-
-Aim first: pl.regions(lines) maps the blocks, pl.grep(lines, term) finds
-labels and stop words, pl.render(...) shows a slice, pl.table(...) gives
-the grid. Then the parser: KEY + def parse(frames) — the canonical dict, or
-a LIST with one dict per account table — ending with the demo under
-if __name__ == "__main__": print and reconcile. Return the complete script
-in one ```python fence. Unsure what something says? Burner probe (first
-line "# probe") and print it."""
+# The full system message: system + response contract + worked example,
+# composed by assembly.j2.md via includes.
+PY_SYSTEM_PROMPT = render_prompt("assembly.j2.md")
 
 
 GATE_RUNNER = '''import importlib.util
@@ -287,43 +157,7 @@ def py_feedback(evaluation: dict) -> str:
 
 
 # --- py maintain mode: evolve a registered parser, never from scratch ---------
-
-MAINTAIN_ADDENDUM = """MAINTENANCE MODE. You are revising an EXISTING registered parser that
-already works for at least one statement. Rules of maintenance:
-- KEY stays exactly as given — never rename, never register a new key.
-- Make the SMALLEST change that fixes the failing statement(s) WITHOUT
-  breaking the passing one(s). The gate runs parse() on EVERY statement;
-  all must verify. Prefer a new fallback branch or a widened condition over
-  a restructure; keep what already works working.
-- Diagnose from the baseline verdict first: it names each failing statement
-  and the exact error (crash hint, schema row, or reconcile divergence).
-  Read it before touching anything.
-- When a statement prints section totals ("Total deposits and other
-  additions", ...), bind them into totals[] — independent accuracy checks
-  that catch errors end-to-end reconcile mathematically cannot see.
-- You already hold the layout knowledge in the baseline code; probe (first
-  line '# probe', as always) only what the baseline doesn't explain — e.g.
-  the failing statement's header row, its stop words, its money formats.
-- The ONE restructure maintenance may not avoid: a statement holding SEVERAL
-  accounts needs parse() to return a LIST of canonical dicts, one per
-  account (each reconciles on its own) — even when the baseline's
-  single-account dict already verifies. Cover every account table."""
-
-MAINTAIN_TASK_TEMPLATE = """Maintaining the registered parser {key}.
-Statement set: {names}. frames.json in the working directory holds them all
-(first: {name}, {pages} pages, {lines} layout lines).
-
-Baseline verdict (the CURRENT registry code, run on every statement):
-{verdict}
-
-Current registered source:
-```python
-{code}
-```
-
-Tweak it minimally so EVERY statement verifies. Keep KEY = "{key}" exactly.
-Return the complete revised script in one ```python fence; probe first when
-the baseline doesn't explain a failure."""
+# (prompts: tools/prompts/maintain_addendum.j2.md + maintain_task.j2.md)
 
 
 # --- LLM transport (raw code, not json_object) --------------------------------
@@ -787,7 +621,6 @@ def draft_by_repl(
     trace: Trace,
     canned_script: Path | None = None,
     system_prompt: str = PY_SYSTEM_PROMPT,
-    task_template: str = PY_TASK_TEMPLATE,
     task_message: str | None = None,
     require_key: str | None = None,
     max_probes: int | None = None,
@@ -829,7 +662,8 @@ def draft_by_repl(
         if canned_script is not None:
             code = canned_script.read_text()
         else:
-            task = task_message or task_template.format(
+            task = task_message or render_prompt(
+                "task.j2.md",
                 name=first["name"],
                 pages=1 + max(line["page"] for line in first["lines"]),
                 lines=len(first["lines"]),
@@ -1111,11 +945,7 @@ def main() -> int:
     print(f"workdir: {workdir}")
     trace.log("run start", f"mode={mode}\npdfs={[str(p) for p in args.pdfs]}")
 
-    system = (PY_SYSTEM_PROMPT + "\n\n" + PY_CONTRACT
-              + "\n\nA complete parser for a different (demo) bank — "
-                "imitate its shape and length, not its labels:\n"
-                "```python\n" + PY_EXAMPLE + "\n```")
-    template = PY_TASK_TEMPLATE
+    system = PY_SYSTEM_PROMPT  # system + contract + example (assembly.j2.md)
 
     # Maintain mode: stage the registered parser as the baseline, gate it
     # against the full statement set (old statements = regression set), and
@@ -1153,7 +983,8 @@ def main() -> int:
             trace.log("coverage pins", json.dumps(pins))
             print(f"coverage pinned from baseline: {pins}")
         first = frames["statements"][0]
-        task_message = MAINTAIN_TASK_TEMPLATE.format(
+        task_message = render_prompt(
+            "maintain_task.j2.md",
             key=args.key,
             names=", ".join(p.name for p in args.pdfs),
             name=first["name"],
@@ -1162,12 +993,12 @@ def main() -> int:
             verdict=py_feedback(verdict),
             code=baseline,
         )
-        system += "\n\n" + MAINTAIN_ADDENDUM
+        system += "\n\n" + render_prompt("maintain_addendum.j2.md")
         require_key = args.key
 
     artifact, verified, history = draft_by_repl(
         args.pdfs, workdir, args.rounds, trace, canned_script=args.script,
-        system_prompt=system, task_template=template,
+        system_prompt=system,
         task_message=task_message, require_key=require_key,
         max_probes=args.max_probes, pins=pins,
         crash_streak_limit=args.crash_streak, compact_chars=args.compact_chars,

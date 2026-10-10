@@ -26,6 +26,30 @@ ValueError: label not printed: Statement
 """
 
 
+# --- prompt templates ----------------------------------------------------------
+
+
+def test_prompt_templates_render_clean():
+    assembled = harness.render_prompt("assembly.j2.md")
+    for marker in ("# Frames", "# The deliverable", "# Rules",
+                   "# Sandbox tools", "# Response contract", "KEY = ",
+                   "pl.table", "if __name__"):
+        assert marker in assembled, marker
+    assert "{{" not in assembled and "{%" not in assembled
+    task = harness.render_prompt("task.j2.md", name="stmt.pdf",
+                                 pages=2, lines=41)
+    assert "stmt.pdf" in task and "41 lines" in task
+    assert "{{" not in task
+    maintain = harness.render_prompt(
+        "maintain_task.j2.md", key="us__x__y__1", names="a.pdf",
+        name="a.pdf", pages=1, lines=9, verdict="verdict text",
+        code="KEY = 'us__x__y__1'\n")
+    assert 'KEY = "us__x__y__1"' in maintain and "verdict text" in maintain
+    assert "{{" not in maintain
+    addendum = harness.render_prompt("maintain_addendum.j2.md")
+    assert "Maintenance mode" in addendum
+
+
 # --- shown_indices -------------------------------------------------------------
 
 
