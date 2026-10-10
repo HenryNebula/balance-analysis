@@ -31,6 +31,27 @@ def test_parse_amount_strict_grouping():
     assert sl.parse_amount("3978.53") == 3978.53  # lenient reads it
 
 
+@pytest.mark.parametrize("token,expected", [
+    ("10 750,00 $", 10750.0),      # French: space thousands, comma decimal
+    ("151,30 $", 151.30),
+    ("+ 7 269,81 $", 7269.81),
+    ("- 6 886,21 $", -6886.21),
+    ("1.234,56", 1234.56),         # German: dot thousands
+    ("1 234,56 CR", 1234.56),
+    ("1,234", 1234.0),             # US 3-digit group stays thousands
+    ("1,234.56", 1234.56),         # US cents untouched
+])
+def test_parse_amount_european(token, expected):
+    assert sl.parse_amount(token) == expected
+
+
+def test_parse_amount_european_strict_grouping():
+    # grouping spans spaces in the Euro branch, mirroring commas in the US one
+    assert sl.parse_amount("12 345,67", strict_grouping=True) == 12345.67
+    assert sl.parse_amount("12345,67", strict_grouping=True) is None
+    assert sl.parse_amount("12345,67") == 12345.67  # lenient reads it
+
+
 @pytest.mark.parametrize("token,year,expected", [
     ("05 Mar", 2026, "2026-03-05"),
     ("5 March 2026", None, "2026-03-05"),

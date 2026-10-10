@@ -154,6 +154,9 @@ def parse_amount(token: str | list, strict_grouping: bool = False) -> float | No
         parse_amount("500.00 DR")     -> -500.0     (DR negative, CR positive)
         parse_amount("(45.00)")       -> -45.0      (parenthesised negative)
         parse_amount("1,234.56-")     -> -1234.56   (trailing minus)
+        parse_amount("10 750,00 $")   -> 10750.0    (European: space-grouped
+                                                     thousands, comma decimal)
+        parse_amount("- 6 886,21 $")  -> -6886.21
         parse_amount("3978.53", strict_grouping=True) -> None  (ungrouped)
         parse_amount("")              -> None       (blank/"—"/"Nil")
     None is NOT zero — it means "no readable money here". Rows whose credit
@@ -171,6 +174,17 @@ def parse_amount(token: str | list, strict_grouping: bool = False) -> float | No
     text = re.sub(r"(?i)(cr|dr)$", "", text).strip()
     negative = negative or text.endswith("-") or text.startswith("-")
     text = text.rstrip("-").lstrip("+-").strip()
+    text = re.sub(r"\s*[$€£]\s*$", "", text).strip()  # trailing currency
+    euro = re.search(r",(\d{2})$", text)
+    if euro:  # comma decimal: "10 750,00", "151,30", "1.234,56"
+        head = text[:euro.start()]
+        grouped = re.search(r"[.\s\xa0\u202f]", head)
+        whole = re.sub(r"[.\s\xa0\u202f]", "", head)
+        if whole.isdigit():
+            if strict_grouping and len(whole) >= 4 and not grouped:
+                return None  # ungrouped run of 4+ digits
+            value = float(f"{whole}.{euro.group(1)}")
+            return -value if negative else value
     match = re.match(r"^\$?\s*([\d,]+(?:\.\d+)?)$", text)
     if not match:
         return None
@@ -238,6 +252,35 @@ def parse_date(token: str, default_year: int | None = None) -> str | None:
 
 
 # --- The ledger grid (geometry solved once, not per parser) ---------------------
+
+
+RIGHT_NUMBER_RE = re.compile(r"\d{1,3}(?:[.,]\d{1,2})?\s*[$€£]?")
+BARE_GROUP_RE = re.compile(r"\d{1,3}")
+
+
+def _merge_numeric_fragments(items: list[list]) -> list[list]:
+    """Rejoin numbers the extractor split at their group spaces: a bare digit
+    group sitting within ~6pt of an amount fragment is one printed value
+    spread over two items ("10"+"750,00", "6"+"900,98 $"); unbinned, the
+    leading group scatters into a neighboring column and the cell reads
+    200,45 instead of 1 200,45. Word neighbors ("02"+"janv.") never merge."""
+    merged: list[list] = []
+    pending: list | None = None
+    for text, x1, x2 in items:
+        if pending is not None:
+            left, lx1, lx2 = pending
+            if RIGHT_NUMBER_RE.fullmatch(text) and x1 - lx2 <= 6:
+                pending = [f"{left} {text}", lx1, x2]
+                continue
+            merged.append([left, lx1, lx2])
+            pending = None
+        if BARE_GROUP_RE.fullmatch(text):
+            pending = [text, x1, x2]
+        else:
+            merged.append([text, x1, x2])
+    if pending is not None:
+        merged.append(pending)
+    return merged
 
 
 COLUMN_WORD_RE = re.compile(
@@ -333,7 +376,7 @@ def table(lines: list[dict], header: dict | None = None, start: int | None = Non
                     section_of = label
                     break
         row = {column: "" for column in columns}
-        for item_text, x1, x2 in lines[index]["items"]:
+        for item_text, x1, x2 in _merge_numeric_fragments(lines[index]["items"]):
             center = (x1 + x2) / 2
             for column, (low, high) in zip(columns, bounds):
                 if low <= center < high:
@@ -399,11 +442,17 @@ def render_table(columns: list[str], rows: list[dict],
         print(" | ".join(cell(row, c).ljust(sizes[i]) for i, c in enumerate(cols)))
 
 
+EURO_MONEY_RE = re.compile(
+    r"[-+]?\d{1,3}(?:[ \xa0\u202f]\d{3})+[.,]\d{2}\s*[$€£]?"
+    r"|\d{1,3}[.,]\d{2}\s*[$€£]?")
+
+
 def _anchor_on_line(line: dict, term: str) -> str | None:
     """The value a single line offers for `term`, in resolution order:
     items right of the label item, else the label item's own text after
-    the term (frames extraction merges close words into one item), else
-    None."""
+    the term (frames extraction merges close words into one item), else —
+    when the term spans items ("Solde" + "D'ouverture 1 janvier …") — the
+    first grouped-money token after the term in the line's text."""
     needle = term.lower()
     for text, x1, _x2 in line["items"]:
         if needle not in text.lower():
@@ -416,6 +465,12 @@ def _anchor_on_line(line: dict, term: str) -> str | None:
         if tail:
             return tail
         return None
+    whole = line_text(line)
+    pos = whole.lower().find(needle)
+    if pos >= 0:
+        match = EURO_MONEY_RE.search(whole[pos + len(needle):])
+        if match:
+            return match.group(0).strip()
     return None
 
 
