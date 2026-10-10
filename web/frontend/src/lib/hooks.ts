@@ -139,22 +139,14 @@ export function useCancelRun() {
   })
 }
 
-export function useRound(id: string, number: number | null) {
+export function useTurn(id: string, number: number | null) {
   return useQuery({
-    queryKey: ["round", id, number],
-    queryFn: () => api.round(id, number!),
+    queryKey: ["turn", id, number],
+    queryFn: () => api.turn(id, number!),
     enabled: number != null,
-    // the round_saved event can beat the manager's workdir resolution — the
-    // file exists but the run record doesn't know where yet; retry quietly
+    // a tool event can beat the manager's workdir resolution — the trace
+    // exists but the run record doesn't know where yet; retry quietly
     retry: 3,
     retryDelay: 900,
-  })
-}
-
-export function useRoundOutput(id: string, number: number | null) {
-  return useQuery({
-    queryKey: ["round-output", id, number],
-    queryFn: () => api.roundOutput(id, number!),
-    enabled: number != null,
   })
 }

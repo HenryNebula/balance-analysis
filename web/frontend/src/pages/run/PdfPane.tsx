@@ -143,8 +143,8 @@ export function PdfPane({
       <div className="border-t bg-card px-3 py-1.5 text-xs text-muted-foreground">
         {selection
           ? selection.page === page
-            ? `selection: r${selection.round} · ${label}`
-            : `selection: round ${selection.round} is on page ${(selection.page ?? 0) + 1}`
+            ? `selection: t${selection.turn ?? 0} · ${label}`
+            : `selection: turn ${selection.turn ?? 0} is on page ${(selection.page ?? 0) + 1}`
           : "selection: —"}
       </div>
     </div>

@@ -1,55 +1,81 @@
 import { useEffect, useState } from "react"
 import { Skeleton } from "@/components/ui/skeleton"
 import { cn } from "cn"
-import { useRound, useRoundOutput } from "@/lib/hooks"
+import { useTurn } from "@/lib/hooks"
+import type { ToolCall } from "@/lib/types"
 
-// The bottom pane: the selected round's script (round_N.py) or its trace
-// (round_N.out). The live trace arrives WITH the round_ran event — no
-// workdir round-trip, it lands the same moment the overlay does.
+// The bottom pane: parser.py as of the selected turn (write/edit events
+// carry snapshots, so scrubbing shows the file at that moment), or the
+// turn's tool transcript — every call with its result. The LIVE turn
+// renders from the SSE fold alone: no fetch, it lands the moment the
+// agent's tools do.
+function Transcript({ tools }: { tools: ToolCall[] }) {
+  if (!tools.length) return <>{/* nothing said this turn */}</>
+  return (
+    <>
+      {tools.map((call, i) => (
+        <div key={i} className="mb-3">
+          <div className="text-zinc-400">
+            <span className="font-semibold text-zinc-200">▸ {call.name}</span>{" "}
+            {call.args ? JSON.stringify(call.args) : ""}
+          </div>
+          <pre className="mt-0.5 whitespace-pre-wrap font-mono text-xs leading-relaxed text-zinc-400">
+            {(call.result ?? "").slice(0, 4000)}
+          </pre>
+        </div>
+      ))}
+    </>
+  )
+}
+
 export function CodePane({
   runId,
-  round,
+  turn,
   mode,
-  liveRound,
-  liveOutput,
+  liveTurn,
+  liveCode,
+  liveTools,
   onModeChange,
 }: {
   runId: string
-  round: number | null
-  mode: "code" | "output"
-  liveRound: number | null // the round currently executing, while the run lives
-  liveOutput: string | undefined
-  onModeChange: (mode: "code" | "output") => void
+  turn: number | null
+  mode: "parser" | "trace"
+  liveTurn: number | null // the turn currently executing, while the run lives
+  liveCode: string | undefined // latest parser.py snapshot from the fold
+  liveTools: ToolCall[] | undefined
+  onModeChange: (mode: "parser" | "trace") => void
 }) {
-  const { data: detail, isLoading } = useRound(runId, round)
-  const { data: fileOutput } = useRoundOutput(
-    runId,
-    mode === "output" && liveOutput === undefined ? round : null,
-  )
+  const isLive = turn != null && turn === liveTurn
+  const { data: detail, isLoading } = useTurn(runId, isLive ? null : turn)
 
-  // "code-fresh" flash when a new round's code lands
+  // "code-fresh" flash when a new parser snapshot lands
   const [flash, setFlash] = useState(0)
   useEffect(() => {
-    if (detail) setFlash((f) => f + 1)
-  }, [detail?.code]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (liveCode !== undefined || detail?.code) setFlash((f) => f + 1)
+  }, [liveCode, detail?.code]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const code = isLive ? liveCode : detail?.code
+  const tools = isLive ? liveTools : detail?.tools
 
   const title =
-    round == null
+    turn == null
       ? "—"
-      : mode === "output"
-        ? `round_${round}.out${liveRound === round && liveOutput !== undefined ? " · live tail" : ""}`
-        : `round_${round}.py${detail ? " · " + detail.kind : ""}`
+      : mode === "trace"
+        ? `${turn === 0 ? "baseline" : `turn ${turn}`} transcript${isLive ? " · live" : ""}`
+        : `parser.py${turn != null ? ` @ ${turn === 0 ? "t₀" : `t${turn}`}` : ""}`
 
   const body =
-    round == null
-      ? "select a round to see its script and trace"
-      : mode === "output"
-        ? liveOutput ?? fileOutput ?? `(no captured output for round ${round})`
-        : isLoading
+    turn == null
+      ? "select a turn to see parser.py and what the agent said"
+      : mode === "trace"
+        ? (tools ?? []).length
+          ? null // rendered as the transcript below
+          : isLive
+            ? "the agent is thinking…"
+            : "(no tool calls recorded for this turn)"
+        : isLoading && !isLive
           ? null
-          : detail
-            ? detail.code
-            : `(round ${round} not resolvable yet — the harness may still be writing it)`
+          : code ?? `(no parser.py yet at ${turn === 0 ? "the baseline" : `turn ${turn}`})`
 
   return (
     <div className="flex h-[38%] min-h-48 flex-col border-t bg-zinc-950 text-zinc-100">
@@ -57,19 +83,19 @@ export function CodePane({
         <span className="mr-2 font-mono text-xs text-zinc-400">{title}</span>
         <div className="ml-auto flex items-center gap-1">
           <button
-            onClick={() => onModeChange("code")}
+            onClick={() => onModeChange("parser")}
             className={cn(
               "rounded px-2 py-0.5 text-xs",
-              mode === "code" ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-300",
+              mode === "parser" ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-300",
             )}
           >
-            script
+            parser
           </button>
           <button
-            onClick={() => onModeChange("output")}
+            onClick={() => onModeChange("trace")}
             className={cn(
               "rounded px-2 py-0.5 text-xs",
-              mode === "output" ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-300",
+              mode === "trace" ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-300",
             )}
           >
             trace
@@ -78,7 +104,11 @@ export function CodePane({
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-3">
         {body === null ? (
-          <Skeleton className="h-4 w-2/3 bg-zinc-800" />
+          mode === "trace" ? (
+            <Transcript tools={tools ?? []} />
+          ) : (
+            <Skeleton className="h-4 w-2/3 bg-zinc-800" />
+          )
         ) : (
           <pre key={flash} className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-zinc-200">
             {body}

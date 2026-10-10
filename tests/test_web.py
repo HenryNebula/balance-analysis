@@ -462,70 +462,9 @@ import subprocess  # noqa: E402
 import sys  # noqa: E402
 import time as _time  # noqa: E402
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[1]
 CANNED_FULL = (REPO / "src" / "statementledger" / "registry"
-               / "us__bluelantern__savings__1.py")
-
-
-def _load_harness():
-    import importlib.util
-
-    sys.path.insert(0, str(REPO / "tools"))  # the harness does `import envloader`
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "distill_harness", REPO / "tools" / "distill_harness.py")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    finally:
-        sys.path.remove(str(REPO / "tools"))
-    return module
-
-
-def test_resolve_selection():
-    harness = _load_harness()
-    lines = json.loads(
-        (FIXTURES / "bluelantern_savings.frames.json").read_text()
-    )["statements"][0]["lines"]
-
-    # explicit SELECT: line -> resolved ids + bounding rect (pdfplumber pt)
-    stdout = ('001 ["x", 10, 20]\n'
-              'SELECT:{"page": 0, "lines": [2, 6], "label": "rows"}\n')
-    selection = harness.resolve_selection(stdout, lines)
-    assert selection["line_ids"] == [2, 3, 4, 5]
-    assert selection["label"] == "rows"
-    expected_x1 = min(item[1] for i in [2, 3, 4, 5]
-                      for item in lines[i]["items"])
-    expected_x2 = max(item[2] for i in [2, 3, 4, 5]
-                      for item in lines[i]["items"])
-    assert selection["rect"][0] == expected_x1
-    assert selection["rect"][2] == expected_x2
-
-    # no SELECT: -> fall back to the indices pl.show() printed
-    shown = "\n".join(f"{i:03d} [{lines[i]['items'][0][0][:8]!r}...]"
-                      for i in (3, 4, 5))
-    fallback = harness.resolve_selection(shown, lines)
-    assert fallback["line_ids"] == [3, 4, 5]
-
-    assert harness.resolve_selection("nothing here", lines) is None
-
-
-def test_harness_writes_trajectory(tmp_path):
-    events = tmp_path / "events.jsonl"
-    probe = tmp_path / "probe.py"
-    probe.write_text('# probe\nimport statementledger as pl\n'
-                     'pl.show(pl.load_frames()[0]["lines"], 4)\n')
-    result = subprocess.run(
-        [sys.executable, "tools/distill_harness.py", str(BLUE),
-         "--script", str(probe), "--rounds", "1", "--no-save",
-         "--jsonl-trajectory", str(events)],
-        cwd=REPO, capture_output=True, text=True, timeout=120)
-    assert result.returncode == 1  # one probe round, nothing verified
-    types = [json.loads(line)["type"] for line in
-             events.read_text().splitlines()]
-    assert types[0] == "run_started"
-    assert "frames" in types and "round_saved" in types
-    assert "probe_select" in types  # show() output maps to a selection
-    assert types[-1] == "failed"
+               / f"{BLUE_KEY}.py")
 
 
 @pytest.fixture()
@@ -571,13 +510,33 @@ def test_run_converges_and_auto_parses(run_client):
     stream = run_client.get(f"/runs/{run_id}/events")
     assert stream.status_code == 200
     assert stream.headers["content-type"].startswith("text/event-stream")
-    assert "converged" in stream.text and "run_status" in stream.text
+    payloads = [json.loads(line[6:]) for line in stream.text.splitlines()
+                if line.startswith("data: ")]
+    types = [event["type"] for event in payloads if "type" in event]
+    assert types[0] == "run_started"   # model came from the trace's run start
+    assert "gate" in types             # the canned gate
+    assert types[-1] == "converged"    # terminal (run_status carries no type)
+    assert run_client.get(f"/runs/{run_id}", headers=JSON).json()[
+        "model"] == "canned script"
 
-    # round artifacts are browsable
-    detail = run_client.get(f"/runs/{run_id}/rounds/0").json()
-    assert detail["kind"] == "script"
+    # turn 0 (the canned zone) is browsable: staged code + gate verdict
+    detail = run_client.get(f"/runs/{run_id}/turns/0").json()
     assert "def parse(" in detail["code"]
     assert detail["verdict"]["verified"]
+    assert detail["summary"] is None or detail["notes"]
+
+
+def test_run_saved_to_overlay_not_package(run_client):
+    """Runtime-distilled parsers are USER DATA: the canned run must save
+    into the app's registry overlay, never into the package source."""
+    create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
+    sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
+    run_id = _launch(run_client, "blue-lantern-savings", [sid]).json()["run_id"]
+    run = _wait_terminal(run_client, run_id)
+    assert run["status"] == "converged"
+    from statementledger import registry
+    overlay = registry.user_registry()
+    assert overlay is not None and (overlay / f"{BLUE_KEY}.py").exists()
 
 
 def test_run_validation_and_lock(run_client, tmp_path, monkeypatch):
@@ -605,41 +564,54 @@ def test_run_validation_and_lock(run_client, tmp_path, monkeypatch):
 
 
 def test_launch_maintain_defaults_to_pin(run_client):
-    create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
+    # pin the bank's own parser: maintain targets the pin with no explicit
+    # key, the staged baseline already verifies, and the run converges with
+    # nothing to do (the canned BLUE script would fail the key-pin check —
+    # maintain mode refuses a parser that renames the key)
+    create(run_client, "Blue Lantern Savings", key=BLUE_KEY)
     sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
     response = _launch(run_client, "blue-lantern-savings", [sid],
                        mode="maintain")  # no explicit key: use the pin
     assert response.status_code == 202
-    run = _wait_terminal(run_client, response.json()["run_id"])
-    assert run["key"] == COPPER_KEY  # maintain targeted the pinned parser
+    run_id = response.json()["run_id"]
+    run = _wait_terminal(run_client, run_id)
+    assert run["key"] == BLUE_KEY  # maintain targeted the pinned parser
+    assert run["status"] == "converged"  # baseline already verifies
+    # the baseline (turn 0) is the staged registry source, gated up front
+    detail = run_client.get(f"/runs/{run_id}/turns/0")
+    assert detail.status_code == 200
+    assert "def parse(" in detail.json()["code"]
+    assert detail.json()["verdict"]["verified"]
 
 
 def test_run_cancel(tmp_path):
-    probe = tmp_path / "probe.py"
-    probe.write_text('# probe\nimport statementledger as pl\n'
-                     'pl.show(pl.load_frames()[0]["lines"], 4)\n')
-    slow = TestClient(create_app(data_root=tmp_path / "data-slow",
-                                 harness_script=probe))
-    create(slow, "Blue Lantern Savings", key=COPPER_KEY)
-    sid = upload(slow, "blue-lantern-savings", BLUE).json()["id"]
-    run_id = _launch(slow, "blue-lantern-savings", [sid],
-                     rounds=500).json()["run_id"]
-    _time.sleep(1.5)  # let a few rounds go by
-    cancel = slow.delete(f"/runs/{run_id}")
+    # a canned parser whose import sleeps inside the sandboxed gate: the run
+    # stays alive long enough to be cancelled mid-gate
+    slow = tmp_path / "slow_parser.py"
+    source = CANNED_FULL.read_text()
+    slow.write_text("import time as _t\n_t.sleep(50)\n" + source)
+    client = TestClient(create_app(data_root=tmp_path / "data-slow",
+                                   harness_script=slow))
+    create(client, "Blue Lantern Savings", key=COPPER_KEY)
+    sid = upload(client, "blue-lantern-savings", BLUE).json()["id"]
+    run_id = _launch(client, "blue-lantern-savings", [sid],
+                     turns=500).json()["run_id"]
+    _time.sleep(1.5)  # let the gate child reach its sleep
+    cancel = client.delete(f"/runs/{run_id}")
     assert cancel.status_code == 202
-    run = _wait_terminal(slow, run_id)
+    run = _wait_terminal(client, run_id)
     assert run["status"] == "cancelled"
-    events = slow.get(f"/runs/{run_id}/events").text
+    events = client.get(f"/runs/{run_id}/events").text
     assert "cancelled" in events
     # a cancelled run frees the one-run lock
-    assert _launch(slow, "blue-lantern-savings", [sid],
-                   rounds=1).status_code == 202
+    assert _launch(client, "blue-lantern-savings", [sid],
+                   turns=1).status_code == 202
 
 
 def test_attach_to_existing_run(run_client):
-    result = subprocess.run(  # a real harness run, no trajectory flag
-        [sys.executable, "tools/distill_harness.py", str(BLUE),
-         "--script", str(CANNED_FULL), "--rounds", "1", "--no-save"],
+    result = subprocess.run(  # a real agent run, no trajectory flag
+        [sys.executable, "tools/distill_agent.py", str(BLUE),
+         "--script", str(CANNED_FULL), "--no-save"],
         cwd=REPO, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0
     workdir = next(line.split(": ", 1)[1] for line in result.stdout.splitlines()

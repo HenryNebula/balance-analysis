@@ -1,167 +1,207 @@
 // The run view's event fold: every SSE trajectory event folds into this
 // state and the timeline/pdf/code panes render from it. No DOM patching, no
-// fetch races — selecting a round and following are plain state.
-import type { RunEvent } from "@/lib/types"
+// fetch races — selecting a turn and following are plain state.
+//
+// The unit is a TURN of the agent loop (turn 0 = the baseline/canned zone
+// before the loop starts). Tool chips land live as the agent works; the
+// turn summary line (arriving when the turn closes) settles the row.
+import type { RunEvent, ToolCall } from "@/lib/types"
 
-export interface Badge {
-  id: string // one badge per category; refiring replaces it
-  text: string
-  tone: "ok" | "fail" | "muted" | "key"
+export type ChipTone = "look" | "code" | "gate" | "fail"
+
+export interface ToolChip {
+  name: string
+  tone: ChipTone
 }
 
-export interface RoundState {
-  number: number
-  kind: "probe" | "script" | null
-  badges: Badge[]
+export interface GateBadge {
+  verified: boolean
+  clean?: number
+  total?: number
+  error?: string
+}
+
+export interface TurnState {
+  turn: number
+  tools: ToolChip[] // chips in arrival order
+  gate: GateBadge | null
+  summary: string | null
+  charsK: number | null
   notes: string[]
-  running: boolean
-  hasOutput: boolean
+  running: boolean // opened, summary not yet seen
 }
 
 export interface RunViewState {
-  order: number[] // round numbers in arrival order
-  rounds: Record<number, RoundState>
-  selections: Record<number, RunEvent> // last probe_select per round
-  outputs: Record<number, string> // live stdout tail from round_ran
+  order: number[] // turn numbers in arrival order
+  turns: Record<number, TurnState>
+  tools: Record<number, ToolCall[]> // per-turn transcript, live
+  parser: Record<number, string> // parser.py snapshot as of each turn
+  currentCode: string // the latest snapshot (live code pane)
+  selections: Record<number, RunEvent> // last look event per turn
   status: string
   terminal: boolean
   finishMessage: string | null
   model: string // from run_started — available while live, no refetch needed
   convergedKey: string // from the converged event (attach/canned runs may
   // never persist it into the run record — the banner needs it anyway)
+  saved: boolean | null
 }
 
 export const initialRunState: RunViewState = {
   order: [],
-  rounds: {},
+  turns: {},
+  tools: {},
+  parser: {},
+  currentCode: "",
   selections: {},
-  outputs: {},
   status: "running",
   terminal: false,
   finishMessage: null,
   model: "",
   convergedKey: "",
+  saved: null,
 }
 
-function round(state: RunViewState, number: number): RoundState {
-  return state.rounds[number] ?? { number, kind: null, badges: [], notes: [], running: false, hasOutput: false }
+const TONES: Record<string, ChipTone> = {
+  grep: "look",
+  render: "look",
+  table: "look",
+  python: "look",
+  read: "code",
+  write: "code",
+  edit: "code",
+  run: "gate",
 }
 
-function withRound(state: RunViewState, r: RoundState): RunViewState {
-  if (!state.rounds[r.number]) state.order.push(r.number)
-  state.rounds[r.number] = r
-  return { ...state, rounds: { ...state.rounds }, order: [...state.order] }
+function turn(state: RunViewState, number: number, baseline = false): TurnState {
+  return state.turns[number] ?? {
+    turn: number,
+    tools: [],
+    gate: null,
+    summary: null,
+    charsK: null,
+    notes: baseline ? ["baseline (staged parser.py)"] : [],
+    running: true,
+  }
 }
 
-function badge(r: RoundState, b: Badge): RoundState {
-  return { ...r, badges: [...r.badges.filter((x) => x.id !== b.id), b] }
+function withTurn(state: RunViewState, t: TurnState): RunViewState {
+  if (!state.turns[t.turn]) state.order.push(t.turn)
+  state.turns[t.turn] = t
+  return { ...state, turns: { ...state.turns }, order: [...state.order] }
 }
 
-function gateSummary(verdict: RunEvent["verdict"]): { text: string; tone: Badge["tone"] } {
-  if (!verdict) return { text: "gate ?", tone: "muted" }
-  if (verdict.verified) return { text: "gate ✓", tone: "ok" }
-  const first = (verdict.results || [])[0] || {}
-  const error = (first.error || "").split("\n")[0].slice(0, 60)
+function gateBadge(verdict: RunEvent["verdict"]): GateBadge {
+  if (!verdict) return { verified: false }
+  const results = verdict.results ?? []
   return {
-    text: `gate ✗ ${verdict.clean ?? 0}/${verdict.results?.length ?? "?"}${error ? " · " + error : ""}`,
-    tone: "fail",
+    verified: Boolean(verdict.verified),
+    clean: verdict.clean,
+    total: results.length || undefined,
+    error: (results.find((r) => r.error)?.error ?? "").split("\n")[0].slice(0, 80) || undefined,
   }
 }
 
 function clearAllRunning(state: RunViewState): RunViewState {
-  // a terminal event settles every in-flight round — none may keep its
-  // "running…" badge (text OR pulse) after the run ended
-  const rounds = Object.fromEntries(
-    Object.entries(state.rounds).map(([k, r]) => [
+  // a terminal event settles every in-flight turn — none may keep its
+  // "running" pulse after the run ended
+  const turns = Object.fromEntries(
+    Object.entries(state.turns).map(([k, t]) => [
       Number(k),
-      {
-        ...r,
-        running: false,
-        badges: r.badges.map((b) =>
-          b.id === "ran" && b.text.startsWith("running")
-            ? { ...b, text: "stopped", tone: "muted" as const }
-            : b,
-        ),
-      },
+      t.summary ? t : { ...t, running: false, summary: t.summary ?? "stopped" },
     ]),
   )
-  return { ...state, rounds }
+  return { ...state, turns }
 }
 
-export function runReducer(state: RunViewState, event: RunEvent | { type: "run_status"; status: string }): RunViewState {
+export function runReducer(
+  state: RunViewState,
+  event: RunEvent | { type: "run_status"; status: string },
+): RunViewState {
   if (event.type === "run_started") {
     return { ...state, model: (event as RunEvent).model || state.model }
   }
-  // every case below except the terminal ones carries a round number — the
-  // harness guarantees it; the non-null assertions encode that contract
-  const number = (event as RunEvent).round!
+  if (event.type === "frames") return state // header info; nothing to fold
+  const number = (event as RunEvent).turn ?? 0
   switch (event.type) {
-    case "round_saved": {
-      let r = round(state, number)
-      r = badge(r, { id: "kind", text: event.kind === "probe" ? "probe" : "script", tone: event.kind === "probe" ? "key" : "muted" })
-      r = badge(r, { id: "ran", text: "running…", tone: "key" }) // blue = in flight
-      r.running = true
-      r.kind = (event.kind as "probe" | "script") ?? r.kind
-      return withRound(state, r)
-    }
-    case "round_ran": {
-      let r = round(state, number)
-      r.running = false
-      r = badge(r, { id: "ran", text: event.returncode === 0 ? "ran ✓" : "ran ✗", tone: event.returncode === 0 ? "ok" : "fail" })
-      const next = withRound(state, r)
-      if (event.stdout_tail) {
-        // immutable folds: identity-based consumers (useMemo, memo props)
-        // must see a new object, not an in-place mutation
-        next.outputs = { ...state.outputs, [number]: event.stdout_tail }
-        next.rounds[number] = { ...next.rounds[number], hasOutput: true }
+    case "tool": {
+      const e = event as RunEvent
+      let t = turn(state, number)
+      t = { ...t, tools: [...t.tools, { name: e.name ?? "?", tone: TONES[e.name ?? ""] ?? "look" }] }
+      const next = withTurn(state, t)
+      next.tools = {
+        ...state.tools,
+        [number]: [...(state.tools[number] ?? []), { name: e.name ?? "?", args: e.args, result: e.result }],
       }
+      return next
+    }
+    case "parser": {
+      const e = event as RunEvent
+      const next = { ...state, currentCode: e.content ?? state.currentCode }
+      next.parser = { ...state.parser, [number]: e.content ?? "" }
       return next
     }
     case "gate": {
-      let r = round(state, number)
-      r.running = false
-      const g = gateSummary(event.verdict)
-      r = badge(r, { id: "gate", ...g })
-      return withRound(state, r)
+      const e = event as RunEvent
+      const t = turn(state, number, e.baseline)
+      const gated = { ...t, gate: gateBadge(e.verdict) }
+      if (e.baseline && gated.summary === null) gated.summary = "baseline"
+      return withTurn(state, gated)
     }
-    case "probe_select": {
-      const r = round(state, number)
-      const next = withRound(state, r)
+    case "look": {
+      const t = turn(state, number)
+      const next = withTurn(state, t)
       next.selections = {
         ...state.selections,
-        [number]: { ...event, rect: event.rect ?? [] },
+        [number]: { ...(event as RunEvent), rect: (event as RunEvent).rect ?? [] },
       }
       return next
     }
-    case "lint_rejected": {
-      let r = round(state, number)
-      r.running = false
-      r = badge(r, { id: "lint", text: "lint ✗", tone: "fail" })
-      r.notes = [...r.notes, String(event.violation || "").slice(0, 120)]
-      return withRound(state, r)
+    case "turn": {
+      const e = event as RunEvent
+      let t = turn(state, number)
+      t = {
+        ...t,
+        running: false,
+        summary: e.summary ?? t.summary,
+        charsK: e.chars_k ?? t.charsK,
+        notes: [...t.notes, ...(e.notes ?? [])],
+      }
+      return withTurn(state, t)
+    }
+    case "elided": {
+      const e = event as RunEvent
+      const t = turn(state, number)
+      return withTurn(state, {
+        ...t,
+        notes: [...t.notes, `${e.forced ? "overflow — forced " : ""}elision (${e.chars ?? 0} chars)`],
+      })
     }
     case "chat_failed": {
-      let r = round(state, number)
-      r.running = false
-      r = badge(r, { id: "chat", text: "chat ✗", tone: "fail" })
-      r.notes = [...r.notes, String(event.error || "").slice(0, 120)]
-      return withRound(state, r)
-    }
-    case "feedback_sent": {
-      const r = round(state, number)
-      r.notes = [...r.notes, String(event.summary || "").slice(0, 140)]
-      return withRound(state, r)
+      const e = event as RunEvent
+      const t = turn(state, number, false)
+      return withTurn(state, {
+        ...t,
+        tools: [...t.tools, { name: "chat", tone: "fail" as const }],
+        notes: [...t.notes, String(e.error ?? "").slice(0, 120)],
+      })
     }
     case "converged":
       return clearAllRunning({
         ...state,
         status: "converged",
         terminal: true,
-        convergedKey: event.key || "",
-        finishMessage: `Converged — parser ${event.key || ""}${event.saved ? " saved to the registry" : ""}`,
+        convergedKey: (event as RunEvent).key || state.convergedKey,
+        saved: (event as RunEvent).saved ?? true,
+        finishMessage: `VERIFIED — parser ${((event as RunEvent).key || "") + ((event as RunEvent).saved ?? true ? " saved to the registry" : " (draft not saved)")}`,
       })
     case "failed":
-      return clearAllRunning({ ...state, status: "failed", terminal: true, finishMessage: `Failed — ${event.reason || ""}` })
+      return clearAllRunning({
+        ...state,
+        status: "failed",
+        terminal: true,
+        finishMessage: `Failed — ${(event as RunEvent).reason || ""}`,
+      })
     case "cancelled":
       return clearAllRunning({ ...state, status: "cancelled", terminal: true, finishMessage: "Cancelled." })
     case "run_status":

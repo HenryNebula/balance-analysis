@@ -31,7 +31,7 @@ const metas = await (await fetch(`${BASE}/accounts/${slug}`, { headers: { accept
 const { run_id } = await (await fetch(`${BASE}/runs`, {
   method: "POST",
   headers: { accept: "application/json", "content-type": "application/json" },
-  body: JSON.stringify({ account_slug: slug, statement_ids: metas.metas.map((m) => m.id), mode: "draft", rounds: 500, max_probes: 500 }),
+  body: JSON.stringify({ account_slug: slug, statement_ids: metas.metas.map((m) => m.id), mode: "draft", turns: 500 }),
 })).json()
 console.log("run:", run_id)
 

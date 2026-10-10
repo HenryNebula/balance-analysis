@@ -585,17 +585,17 @@ def create_app(data_root: Path | None = None,
 
     @app.post("/runs")
     async def launch_run(request: Request):
-        """JSON {account_slug, statement_ids, mode, key?, rounds?,
-        max_probes?, workdir?} or the same fields as a form. workdir set =
-        attach to an existing harness run (tail-watch fallback, §8.2b)."""
+        """JSON {account_slug, statement_ids, mode, key?, turns?,
+        workdir?} or the same fields as a form. workdir set = attach to an
+        existing agent run (tail-watch fallback, §8.2b)."""
         if request.headers.get("content-type", "").startswith(
                 "application/json"):
             payload = await request.json()
         else:
             form = await request.form()
             payload = {key: form[key] for key in (
-                "account_slug", "statement_ids", "mode", "key", "rounds",
-                "max_probes", "workdir") if form.get(key)}
+                "account_slug", "statement_ids", "mode", "key", "turns",
+                "workdir") if form.get(key)}
         slug = str(payload.get("account_slug") or "")
         account = store.get_account(slug)
         if account is None:
@@ -608,8 +608,7 @@ def create_app(data_root: Path | None = None,
         key = str(payload.get("key") or "").strip() or None
         if mode == "maintain" and not key and account.get("registry_key"):
             key = account["registry_key"]  # maintain = evolve the pin
-        rounds = payload.get("rounds")
-        max_probes = payload.get("max_probes")
+        turns = payload.get("turns")
         workdir = str(payload.get("workdir") or "").strip() or None
         if workdir:  # attach mode: resolve + sanity-check the workdir
             candidate = (repo_root / workdir).resolve()
@@ -618,7 +617,9 @@ def create_app(data_root: Path | None = None,
                 raise HTTPException(400, f"{workdir!r} is not a harness "
                                          "workdir (no trace.log)")
             workdir = candidate
-        elif harness_script is None:  # a real LLM run needs the endpoint
+        elif runs.harness_script is None:  # a real LLM run needs the endpoint
+            # (the manager knows about STMTLEDGER_WEB_HARNESS_SCRIPT too —
+            # the parameter alone misses env-configured canned runs)
             _load_llm_env(repo_root)
             if not os.environ.get("STATEMENTLEDGER_LLM_URL"):
                 raise HTTPException(
@@ -626,9 +627,7 @@ def create_app(data_root: Path | None = None,
                     "STATEMENTLEDGER_LLM_* in .env (see .env.example)")
         try:
             run = runs.create(account, ids, mode, key=key,
-                              rounds=int(rounds) if rounds else None,
-                              max_probes=(int(max_probes) if max_probes
-                                          else None),
+                              turns=int(turns) if turns else None,
                               workdir=workdir)
         except FileNotFoundError as error:
             raise HTTPException(404, str(error))
@@ -682,30 +681,17 @@ def create_app(data_root: Path | None = None,
             raise HTTPException(404, f"no run {run_id!r}")
         return Response(status_code=202)
 
-    @app.get("/runs/{run_id}/rounds/{number}")
-    def run_round(run_id: str, number: int, request: Request):
+    @app.get("/runs/{run_id}/turns/{number}")
+    def run_turn(run_id: str, number: int, request: Request):
+        """One turn of the agent trajectory: the parser.py snapshot as of
+        that turn, its gate verdict, the summary, and the tool transcript."""
         try:
-            detail = runs.round_detail(run_id, number)
+            detail = runs.turn_detail(run_id, number)
         except FileNotFoundError:
             raise HTTPException(404, f"no run {run_id!r}")
         if detail is None:
-            raise HTTPException(404, f"no round {number}")
+            raise HTTPException(404, f"no turn {number}")
         return JSONResponse(detail)
-
-    @app.get("/runs/{run_id}/rounds/{number}/output")
-    def run_round_output(run_id: str, number: int, request: Request):
-        """The round's captured stdout/stderr (round_N.out) — what the probe
-        or script actually printed, for the run view's trace pane."""
-        try:
-            run = runs.get(run_id)
-        except FileNotFoundError:
-            raise HTTPException(404, f"no run {run_id!r}")
-        workdir = run.get("workdir")
-        path = (Path(workdir) / f"round_{number}.out" if workdir else None)
-        if path is None or not path.exists():
-            raise HTTPException(404, f"no output for round {number}")
-        return JSONResponse({"round": number,
-                             "output": path.read_text(errors="replace")})
 
     @app.get("/runs/{run_id}/events")
     async def run_events(run_id: str, request: Request):

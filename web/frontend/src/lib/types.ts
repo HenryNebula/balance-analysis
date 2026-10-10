@@ -151,36 +151,64 @@ export interface StatementDetailData {
   llm_model: string
 }
 
-export interface RoundDetail {
-  round: number
-  kind: "probe" | "script"
-  code: string
-  verdict?: {
-    verified?: boolean
-    clean?: number
-    results?: Array<{ error?: string }>
-  } | null
+export interface GateVerdict {
+  key?: string | null
+  verified?: boolean
+  clean?: number
+  results?: Array<{ name?: string; ok?: boolean; error?: string }>
+  gate_crashed?: boolean
 }
 
-// -- harness trajectory events (SSE) ------------------------------------------
+export interface ToolCall {
+  name: string
+  args?: Record<string, unknown>
+  result?: string
+}
+
+export interface TurnDetail {
+  turn: number
+  code: string | null
+  verdict?: GateVerdict | null
+  summary?: string | null
+  notes: string[]
+  tools: ToolCall[]
+}
+
+// -- agent trajectory events (SSE), derived from trace.log ---------------------
 
 export interface RunEvent {
   type: string
   ts?: string
-  round?: number
-  kind?: string
+  turn?: number
+  // run_started / frames
+  model?: string
+  statements?: number
+  name?: string // frames: first statement's name; tool: the tool's name
+  lines?: number
+  // tool
+  args?: Record<string, unknown>
+  result?: string
+  // gate
+  verdict?: GateVerdict
+  baseline?: boolean
+  // parser snapshot
+  content?: string
+  // look (what render/grep examined)
+  tool?: string
   label?: string
   rect?: number[]
   line_ids?: number[]
   page?: number
-  verdict?: RoundDetail["verdict"]
-  returncode?: number
-  stdout_tail?: string
-  violation?: string
-  error?: string
+  // turn
   summary?: string
+  chars_k?: number
+  notes?: string[]
+  // elided / chat_failed
+  chars?: number
+  forced?: boolean
+  error?: string
+  // terminal
   key?: string
   saved?: boolean
   reason?: string
-  model?: string
 }

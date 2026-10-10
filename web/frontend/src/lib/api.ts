@@ -12,10 +12,10 @@ import type {
   AccountRow,
   ProbeOutcome,
   RegistryRow,
-  RoundDetail,
   RunDetail,
   RunRow,
   StatementDetailData,
+  TurnDetail,
   UploadOutcome,
 } from "./types"
 
@@ -147,8 +147,7 @@ export const api = {
     statement_ids: string[]
     mode: string
     key?: string
-    rounds?: number
-    max_probes?: number
+    turns?: number
   }): Promise<{ run_id: string }> {
     return json(
       await request("/runs", {
@@ -159,15 +158,9 @@ export const api = {
     )
   },
 
-  async round(id: string, number: number): Promise<RoundDetail | null> {
-    const res = await request(`/runs/${id}/rounds/${number}`)
-    if (!res.ok) return null // round not resolvable (yet) — the run view retries
+  async turn(id: string, number: number): Promise<TurnDetail | null> {
+    const res = await request(`/runs/${id}/turns/${number}`)
+    if (!res.ok) return null // turn not resolvable (yet) — the run view retries
     return res.json()
-  },
-
-  async roundOutput(id: string, number: number): Promise<string | null> {
-    const res = await request(`/runs/${id}/rounds/${number}/output`)
-    if (!res.ok) return null
-    return (await res.json()).output
   },
 }

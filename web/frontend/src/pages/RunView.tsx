@@ -12,7 +12,7 @@ import { CodePane } from "./run/CodePane"
 import { PdfPane } from "./run/PdfPane"
 
 // The distill run workspace: the statement under the microscope on the left,
-// the trajectory + round artifacts on the right. Everything renders from the
+// the trajectory + parser artifacts on the right. Everything renders from the
 // SSE event fold in ./run/store — auto-follow, scrubbing, and the code/trace
 // pane are plain state, so they can't race each other.
 export default function RunView() {
@@ -24,7 +24,7 @@ export default function RunView() {
 
   const [selected, setSelected] = useState<number | null>(null)
   const [follow, setFollow] = useState(true)
-  const [paneMode, setPaneMode] = useState<"code" | "output">("code")
+  const [paneMode, setPaneMode] = useState<"parser" | "trace">("parser")
 
   // -- resizable trajectory sidebar (width persists across visits) ----------
   const [sidebarW, setSidebarW] = useState(
@@ -61,32 +61,33 @@ export default function RunView() {
     document.body.style.userSelect = "none"
   }
 
-  const lastRound = state.order.length ? state.order[state.order.length - 1] : null
+  const active = state.status === "running" || state.status === "cancelling"
+  const lastTurn = state.order.length ? state.order[state.order.length - 1] : null
+  const liveTurn = active ? lastTurn : null
 
-  // auto-follow keeps the newest round selected; a manual click unpins it
+  // auto-follow keeps the newest turn selected; a manual click unpins it
   useEffect(() => {
-    if (follow && lastRound != null) setSelected(lastRound)
-  }, [follow, lastRound, state.rounds[lastRound ?? -1]?.hasOutput])
+    if (follow && lastTurn != null) setSelected(lastTurn)
+  }, [follow, lastTurn, state.turns[lastTurn ?? -1]?.tools.length])
 
   // terminal: refresh the run record (auto_parse outcomes land at converge)
   useEffect(() => {
     if (state.terminal && id) qc.invalidateQueries({ queryKey: ["run", id] })
   }, [state.terminal]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const scrub = (round: number) => {
+  const scrub = (turn: number) => {
     setFollow(false)
-    setSelected(round)
-    setPaneMode("code")
+    setSelected(turn)
+    setPaneMode("parser")
   }
-  const trace = (round: number) => {
+  const trace = (turn: number) => {
     setFollow(false)
-    setSelected(round)
-    setPaneMode("output")
+    setSelected(turn)
+    setPaneMode("trace")
   }
 
-  // the newest probe's selection stays on the page while the next round
-  // thinks — the pane only blanks when a scrubbed round has no selection
-  // (the Jinja UI blanked between rounds; that read as flicker)
+  // the newest look stays on the page while the next turn thinks — the pane
+  // only blanks when a scrubbed turn has no look (blanking read as flicker)
   const lastSelection = useMemo(() => {
     const keys = Object.keys(state.selections)
     return keys.length ? state.selections[Number(keys[keys.length - 1])] : undefined
@@ -101,8 +102,6 @@ export default function RunView() {
       </div>
     )
   }
-
-  const active = state.status === "running" || state.status === "cancelling"
 
   return (
     <div className="flex h-svh flex-col bg-background">
@@ -124,6 +123,11 @@ export default function RunView() {
             {state.model || run.model ? (
               <span className="truncate">{state.model || run.model}</span>
             ) : null}
+            {lastTurn != null ? (
+              <span className="shrink-0 text-xs">
+                {state.terminal ? `${lastTurn + 1} turns` : `t${lastTurn}`}
+              </span>
+            ) : null}
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -133,7 +137,7 @@ export default function RunView() {
               size="sm"
               variant={follow ? "secondary" : "ghost"}
               onClick={() => setFollow(!follow)}
-              title="Follow the newest round automatically — any manual click unpins"
+              title="Follow the newest turn automatically — any manual click unpins"
             >
               <Crosshair data-icon="inline-start" className={cn(follow && "text-blue-600")} />
               {follow ? "following" : "follow"}
@@ -183,10 +187,10 @@ export default function RunView() {
                 <div className="font-medium text-emerald-700 dark:text-emerald-400">
                   {(() => {
                     const key = run.converged_key || state.convergedKey
-                    const registered = run.auto_parse !== null
+                    const registered = run.auto_parse !== null && run.auto_parse !== undefined
                     return key
-                      ? `Parser ${key} ${registered ? "saved to the registry." : "verified but not registered (attach or canned run)."}`
-                      : "Parser verified but not registered (attach or canned run)."
+                      ? `Parser ${key} ${registered ? "saved to the registry." : "verified (not registered)."}`
+                      : "Parser verified (not registered)."
                   })()}
                 </div>
                 {run.auto_parse && run.auto_parse.length ? (
@@ -220,10 +224,11 @@ export default function RunView() {
 
           <CodePane
             runId={id ?? ""}
-            round={selected}
+            turn={selected}
             mode={paneMode}
-            liveRound={active ? lastRound : null}
-            liveOutput={selected != null ? state.outputs[selected] : undefined}
+            liveTurn={liveTurn}
+            liveCode={selected != null ? state.currentCode : undefined}
+            liveTools={selected != null ? state.tools[selected] : undefined}
             onModeChange={setPaneMode}
           />
         </aside>

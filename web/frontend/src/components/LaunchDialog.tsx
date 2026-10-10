@@ -47,8 +47,7 @@ export function LaunchDialog({
 
   const [mode, setMode] = useState("draft")
   const [ids, setIds] = useState<string[]>(defaultIds ?? statements.map((s) => s.id))
-  const [rounds, setRounds] = useState("")
-  const [maxProbes, setMaxProbes] = useState("")
+  const [turns, setTurns] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const navigate = useNavigate()
@@ -70,8 +69,7 @@ export function LaunchDialog({
         statement_ids: ids,
         mode,
         key: mode === "maintain" ? pinnedKey ?? undefined : undefined,
-        rounds: rounds ? Number(rounds) : undefined,
-        max_probes: maxProbes ? Number(maxProbes) : undefined,
+        turns: turns ? Number(turns) : undefined,
       })
       navigate(`/runs/${run_id}`)
     } catch (e: any) {
@@ -90,9 +88,10 @@ export function LaunchDialog({
             <FlaskConical className="size-4" /> Register new bank
           </DialogTitle>
           <DialogDescription>
-            The distill harness drafts a parser from your statements and saves it only after
-            the arithmetic gate verifies it. The run streams live — you can watch every round
-            and cancel anytime.
+            The distill agent reads your statements with tools (render, grep, table), writes
+            parser.py one edit at a time, and the arithmetic gate verifies it on every
+            statement — a VERIFIED run saves it to the registry. The trajectory streams live;
+            cancel anytime.
             {model ? ` Model: ${model}.` : ""}
           </DialogDescription>
         </DialogHeader>
@@ -140,29 +139,16 @@ export function LaunchDialog({
               )}
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="grid gap-1.5">
-              <Label htmlFor="launch-rounds">Rounds (optional)</Label>
-              <Input
-                id="launch-rounds"
-                type="number"
-                min={1}
-                placeholder="until verified"
-                value={rounds}
-                onChange={(e) => setRounds(e.target.value)}
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="launch-probes">Max probes (optional)</Label>
-              <Input
-                id="launch-probes"
-                type="number"
-                min={0}
-                placeholder="default"
-                value={maxProbes}
-                onChange={(e) => setMaxProbes(e.target.value)}
-              />
-            </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="launch-turns">Turns (optional)</Label>
+            <Input
+              id="launch-turns"
+              type="number"
+              min={1}
+              placeholder="until verified"
+              value={turns}
+              onChange={(e) => setTurns(e.target.value)}
+            />
           </div>
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
         </div>

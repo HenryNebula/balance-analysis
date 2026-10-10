@@ -1,21 +1,23 @@
-"""Distill-harness run tracking (docs/web-ui-design.md §8.2, §9): the one
+"""Distill-agent run tracking (docs/web-ui-design.md §8.2, §9): the one
 real background job.
 
-The manager spawns tools/distill_harness.py as a tracked subprocess with
---jsonl-trajectory pointing at data/runs/<id>/events.jsonl, tails that file
-plus the process exit status (a watcher thread per run), and the app relays
-the events over SSE. run.json is the durable record — reload-safe. One
-active run at a time (bounded LLM spend). DELETE = SIGTERM to the process
-group, SIGKILL after a grace period; the harness emits a terminal
-`cancelled` event on SIGTERM. A run whose pid is gone on restart is marked
-`orphaned` with its artifacts still browsable. On convergence the pending
-statements are auto-parsed with the new key (the registry needs no restart).
+The manager spawns tools/distill_agent.py as a tracked subprocess. The
+agent has no trajectory flag — its append-only trace.log (in a workdir it
+prints as `workdir: ...` on stdout) IS the trajectory: a watcher thread
+per run tails that file through web.agent_events.TraceDeriver, appends the
+derived events to data/runs/<id>/events.jsonl, and the app relays them over
+SSE. run.json is the durable record — reload-safe. One active run at a
+time (bounded LLM spend). DELETE = SIGTERM to the process group, SIGKILL
+after a grace period; the manager writes the terminal `cancelled` event
+itself (the agent does not trap SIGTERM). A run whose pid is gone on
+restart is marked `orphaned` with its artifacts still browsable. On
+VERIFIED the pending statements are auto-parsed with the new key (the
+registry overlay needs no restart).
 
-Attach mode (§8.2 fallback b, zero harness control): instead of spawning,
-the manager watches an existing logs/distill_* workdir and DERIVES events
-from its artifacts (round_N.py appearing, GATE: lines in gate_round_N.out,
-the trace's result section). No live probe selections — those only exist
-with --jsonl-trajectory.
+Attach mode (§8.2 fallback b): instead of spawning, watch an existing
+agent workdir (any dir with a trace.log) — same derivation, replayed from
+byte zero; events already persisted are skipped, so a re-attach or a
+post-restart adopt never duplicates.
 """
 
 from __future__ import annotations
@@ -35,12 +37,14 @@ from pathlib import Path
 import statementledger as sl
 
 from web import parsing
+from web.agent_events import TraceDeriver
 from web.store import Store
 
 ACTIVE_STATES = ("running", "cancelling")
 TERMINAL_STATES = ("converged", "failed", "cancelled", "orphaned")
 KILL_GRACE_SECONDS = 5.0
 WATCH_INTERVAL = 0.4
+ATTACH_STALL_SECONDS = 180.0  # attach run, no pid: quiet trace → failed
 
 
 def _now() -> str:
@@ -67,7 +71,7 @@ class RunManager:
         self._guard = threading.Lock()
         self._watchers: dict[str, threading.Thread] = {}
         self._processes: dict[str, subprocess.Popen] = {}
-        self._spawned_at: dict[str, float] = {}
+        self._tails: dict[str, dict] = {}  # run_id -> trace tail state
 
     # -- run records -------------------------------------------------------
 
@@ -113,10 +117,10 @@ class RunManager:
     # -- launching -----------------------------------------------------------
 
     def create(self, account: dict, statement_ids: list[str], mode: str,
-               key: str | None = None, rounds: int | None = None,
-               max_probes: int | None = None, workdir: Path | None = None,
+               key: str | None = None, turns: int | None = None,
+               workdir: Path | None = None,
                ) -> dict:
-        """Launch (workdir given: attach to an existing harness run).
+        """Launch (workdir given: attach to an existing agent run).
         Validation raises before anything is created; the one-run lock is
         taken for the check-and-create window only."""
         for sid in statement_ids:
@@ -144,7 +148,7 @@ class RunManager:
             attach = workdir is not None
             run = {"id": run_id, "account_slug": account["slug"],
                    "statement_ids": statement_ids, "mode": mode, "key": key,
-                   "rounds": rounds, "max_probes": max_probes,
+                   "turns": turns,
                    "argv": None, "pid": None, "status": "running",
                    "attach": attach,
                    "workdir": str(workdir) if attach else None,
@@ -157,18 +161,15 @@ class RunManager:
         return run
 
     def _spawn(self, run: dict, events_path: Path) -> None:
-        argv = [sys.executable, "tools/distill_harness.py"]
+        argv = [sys.executable, "tools/distill_agent.py"]
         argv += [str(self.store.original_pdf(run["account_slug"], sid))
                  for sid in run["statement_ids"]]
-        argv += ["--jsonl-trajectory", str(events_path)]
-        if run["rounds"]:
-            argv += ["--rounds", str(run["rounds"])]
+        if run["turns"]:
+            argv += ["--turns", str(run["turns"])]
         if run["key"]:
             argv += ["--key", run["key"]]
-        if run["max_probes"]:
-            argv += ["--max-probes", str(run["max_probes"])]
-        if self.harness_script is not None:  # tests: canned, no LLM
-            argv += ["--script", str(self.harness_script), "--no-save"]
+        if self.harness_script is not None:  # tests: canned, no model
+            argv += ["--script", str(self.harness_script)]
         run["argv"] = argv
         log = (self.runs_root / run["id"] / "harness.log").open("w")
         process = subprocess.Popen(  # noqa: S603 - fixed argv, our repo
@@ -176,10 +177,8 @@ class RunManager:
             stdin=subprocess.DEVNULL, start_new_session=True,
             env={**os.environ, "PYTHONUNBUFFERED": "1"})  # 'workdir:' must
         # reach the log NOW, not when the block buffer fills — the manager
-        # resolves round artifacts from it while the run is live
+        # resolves the trace tail from it while the run is live
         run["pid"] = process.pid
-        self._spawned_at[run["id"]] = time.time()  # WALL clock — compared
-        # against directory mtimes in the workdir fallback
         self._processes[run["id"]] = process  # poll() reaps; zombies don't
 
     # -- events -----------------------------------------------------------
@@ -200,25 +199,126 @@ class RunManager:
                     continue  # a torn tail line: the writer flushes per line
         return events
 
-    def round_detail(self, run_id: str, number: int) -> dict | None:
-        run = self._read(run_id)
+    def _append_events(self, run_id: str, events: list[dict]) -> None:
+        if not events:
+            return
+        with (self._run_dir(run_id) / "events.jsonl").open("a") as out:
+            for event in events:
+                out.write(json.dumps(event) + "\n")
+
+    def _statement_lines(self, run: dict) -> list[dict] | None:
+        """The first statement's frames lines (for look-event rects), or
+        None when there is nothing to resolve against."""
+        if not run.get("statement_ids"):
+            return None
+        try:
+            from web import pages
+
+            pdf = self.store.original_pdf(run["account_slug"],
+                                          run["statement_ids"][0])
+            return pages.cached_frames(pdf, self.store.root / "cache")["lines"]
+        except Exception:  # noqa: BLE001 - look events degrade, run doesn't
+            return None
+
+    def _pump(self, run: dict, final: bool = False) -> None:
+        """Tail the workdir's trace.log through the deriver into
+        events.jsonl. A fresh tail (post-restart adopt, attach) replays the
+        whole trace and skips the events already persisted."""
         workdir = run.get("workdir")
         if not workdir:
-            return None
-        path = Path(workdir) / f"round_{number}.py"
-        if not path.exists():
-            path = Path(workdir) / "baseline.py"
-            if number or not path.exists():
-                return None
-        code = path.read_text()
-        kind = ("probe" if code.lstrip().splitlines()[:1] == ["# probe"]
-                else "script")
+            return
+        trace = Path(workdir) / "trace.log"
+        if not trace.exists():
+            return
+        run_id = run["id"]
+        tail = self._tails.get(run_id)
+        if tail is not None and tail.get("workdir") != workdir:
+            # the authoritative workdir line corrected a guess: never keep
+            # events derived from another run's trace
+            tail = None
+            self._tails.pop(run_id, None)
+        if tail is None:
+            deriver = TraceDeriver(self._statement_lines(run))
+            staged = Path(workdir) / "parser.py"
+            if deriver.parser_code == "" and staged.exists():
+                # canned/baseline runs stage parser.py without a write
+                # section — seed the snapshot so key_hint() can answer
+                deriver.parser_code = staged.read_text(errors="replace")
+            tail = {"deriver": deriver,
+                    "offset": 0, "workdir": workdir,
+                    "skip": len(self.read_events(run_id))}
+            self._tails[run_id] = tail
+        data = trace.read_text(errors="replace")[tail["offset"]:]
+        if not data and not final:
+            return
+        tail["offset"] += len(data)
+        events = tail["deriver"].feed(data)
+        events += tail["deriver"].peek_terminal()
+        if final:
+            events += tail["deriver"].close()
+        if tail["skip"]:
+            events = events[tail["skip"]:]
+            tail["skip"] = 0
+        self._append_events(run_id, events)
+
+    def turn_detail(self, run_id: str, number: int) -> dict | None:
+        """Everything the run view shows for one turn: the parser.py
+        snapshot as of that turn, its gate verdict, the turn summary, and
+        the tool call/result transcript."""
+        run = self._read(run_id)
+        code = None
         verdict = None
+        summary = None
+        notes: list[str] = []
+        tools: list[dict] = []
         for _, event in self.read_events(run_id):
-            if event.get("type") == "gate" and event.get("round") == number:
+            kind = event.get("type")
+            turn = event.get("turn", 0)
+            if kind == "tool" and turn == number:
+                tools.append({"name": event.get("name"),
+                              "args": event.get("args"),
+                              "result": event.get("result", "")})
+            elif kind == "parser" and turn <= number:
+                code = event.get("content", "")  # events arrive in order:
+                # the last snapshot at or before this turn is its state
+            elif kind == "gate" and turn <= number:
                 verdict = event.get("verdict")
-        return {"round": number, "kind": kind, "code": code,
-                "verdict": verdict}
+            elif kind == "turn" and turn == number:
+                summary = event.get("summary")
+                notes = event.get("notes") or []
+            elif kind == "chat_failed" and turn == number:
+                notes.append(event.get("error", ""))
+            elif kind == "elided" and turn == number:
+                notes.append("context elided "
+                             f"({event.get('chars', 0)} chars)")
+        if code is None and verdict is None and summary is None and not tools:
+            return None
+        if code is None and number == 0:
+            code = self._baseline_code(run)
+        return {"turn": number, "code": code, "verdict": verdict,
+                "summary": summary, "notes": notes, "tools": tools}
+
+    def _baseline_code(self, run: dict) -> str | None:
+        """Turn 0 = the staged parser before the loop: for maintain runs
+        that is exactly the registry source of the key (the file evolves
+        afterwards, so reading it later would lie); for canned drafts the
+        staged parser.py in the workdir (written once, never edited)."""
+        try:
+            if run.get("key"):
+                from statementledger.registry import REGISTRY, module_path
+
+                path = module_path(run["key"])
+                if not path.exists():
+                    path = REGISTRY / f"{run['key']}.py"
+                return path.read_text()
+            workdir = run.get("workdir")
+            if workdir:
+                staged = Path(workdir) / "parser.py"
+                if staged.exists():
+                    return staged.read_text(errors="replace")
+        except OSError:
+            pass
+        return None
 
     # -- cancel ------------------------------------------------------------
 
@@ -239,6 +339,7 @@ class RunManager:
         else:
             run["status"] = "cancelled"  # attach run: nothing to signal
             run["ended_at"] = _now()
+            self._append_events(run_id, [{"type": "cancelled"}])
             self._write(run)
         return run
 
@@ -270,48 +371,78 @@ class RunManager:
             self._start_watcher(run)
 
     def _watch(self, run_id: str) -> None:
-        """Tail events.jsonl + the process until a terminal state; on
+        """Tail trace.log → events.jsonl until a terminal state; on
         convergence auto-parse the pending statements with the new key."""
         try:
             self._watch_loop(run_id)
         finally:
             self._processes.pop(run_id, None)
+            self._tails.pop(run_id, None)
 
     def _watch_loop(self, run_id: str) -> None:
-        attach_state = {"done": False, "failed": False}
+        quiet_since: float | None = None
         while True:
             run = self._read(run_id)
             if run.get("status") in TERMINAL_STATES:
                 return
-            events = self.read_events(run_id)
-            terminal = self._apply_events(run, events)
-            if run.get("attach"):
-                terminal = self._derive_attach(run, attach_state) or terminal
-            pid = run.get("pid")
+            self._pump(run)
+            if run.get("pid"):
+                self._find_workdir(run)  # cheap; the log line is authority
+            terminal = self._apply_events(run, self.read_events(run_id))
             if terminal:
-                self._finish(run, terminal)
                 return
             # Exited? Our own child answers via poll() (which also reaps it —
             # kill(pid, 0) succeeds on zombies, so pid-probing a child lies);
             # an adopted run (post-restart) can only be pid-probed.
             process = self._processes.get(run_id)
             exit_code = process.poll() if process is not None else None
+            pid = run.get("pid")
             dead = ((process is not None and exit_code is not None)
                     or (process is None and pid
                         and not _pid_alive(pid)))
             if dead:
-                # allow a brief final flush of events.jsonl
+                # allow a brief final flush of the trace
                 time.sleep(0.4)
+                self._pump(run, final=True)
                 self._apply_events(run, self.read_events(run_id))
                 if run.get("status") in TERMINAL_STATES:
                     return
                 if run["status"] == "cancelling" or exit_code in (130, -15,
                                                                   -9):
+                    self._append_events(run_id, [{"type": "cancelled"}])
                     self._finish(run, "cancelled", exit_code)
                 else:
-                    self._finish(run, "failed", exit_code)
+                    self._synthesize_terminal(run_id, run, exit_code)
                 return
+            if not run.get("pid"):  # attach: no process to observe
+                trace = (Path(run["workdir"]) / "trace.log"
+                         if run.get("workdir") else None)
+                grew = bool(trace and trace.exists()
+                            and trace.stat().st_mtime > time.time() - 5)
+                quiet_since = time.time() if grew else (quiet_since
+                                                        or time.time())
+                if quiet_since and time.time() - quiet_since > ATTACH_STALL_SECONDS:
+                    self._append_events(run_id, [{
+                        "type": "failed",
+                        "reason": "trace went quiet without a result section"}])
+                    self._finish(run, "failed")
+                    return
             time.sleep(WATCH_INTERVAL)
+
+    def _synthesize_terminal(self, run_id: str, run: dict,
+                             exit_code: int | None) -> None:
+        """The process died without a derived terminal event (torn trace,
+        crash): exit code 0 still means VERIFIED, anything else failed."""
+        tail = self._tails.get(run_id)
+        key = (tail["deriver"].key_hint() if tail else None) or run.get("key")
+        if exit_code == 0:
+            self._append_events(run_id, [{"type": "converged",
+                                          "key": key, "saved": True}])
+            self._finish(run, "converged", exit_code)
+        else:
+            self._append_events(run_id, [{"type": "failed", "reason":
+                                          f"agent exited {exit_code}"}])
+            self._finish(run, "failed", exit_code)
 
     def _apply_events(self, run: dict, events: list[tuple[int, dict]]) -> str:
         """Fold new events into run state; return a terminal status or ''."""
@@ -319,7 +450,7 @@ class RunManager:
         for _, event in events:
             kind = event.get("type")
             if kind == "converged":
-                run["converged_key"] = event.get("key")
+                run["converged_key"] = event.get("key") or run.get("key")
                 run["saved"] = event.get("saved", True)
                 terminal = "converged"
             elif kind in ("failed", "cancelled"):
@@ -327,95 +458,25 @@ class RunManager:
         if terminal and run.get("status") not in TERMINAL_STATES:
             self._finish(run, terminal)
             # auto-parse whenever the converged key is loadable from the
-            # registry (a --no-save draft that never registered cannot be)
+            # registry overlay (an unsaved draft cannot be)
             if (terminal == "converged"
                     and run.get("converged_key") in sl.keys()):
                 self._auto_parse(run)
-        if run.get("pid"):
-            self._find_workdir(run)  # cheap; the log line is authoritative
         return terminal if run.get("status") in TERMINAL_STATES else ""
 
     def _find_workdir(self, run: dict) -> None:
-        """The harness prints 'workdir: logs/distill_...' early (its stdout
-        is unbuffered); round artifacts live there. That line is the only
-        authority — it OVERWRITES any provisional fallback value, so a
-        mis-guess can never stick."""
+        """The agent prints 'workdir: logs/distill_...' early (its stdout
+        is unbuffered) — the ONLY source for spawned runs. No mtime
+        guessing: a just-finished neighbour run's workdir would satisfy any
+        recency window, and its trace would inject wrong events."""
         log = self._run_dir(run["id"]) / "harness.log"
-        if log.exists():
-            match = re.search(r"^workdir: (.+)$",
-                              log.read_text(errors="replace"), re.M)
-            if match:
-                truth = match.group(1).strip()
-                if run.get("workdir") != truth:
-                    run["workdir"] = truth
-                    self._write(run)
-                return
-        if run.get("workdir"):
-            return  # provisional value stands until the log speaks
-        since = self._spawned_at.get(run["id"])
-        if since is None:
+        if not log.exists() or run.get("workdir"):
             return
-        candidates = [path for path in (self.repo_root / "logs").glob(
-            "distill_*") if path.is_dir()
-            and path.stat().st_mtime >= since - 1]
-        if candidates:
-            run["workdir"] = str(max(candidates,
-                                     key=lambda p: p.stat().st_mtime))
+        match = re.search(r"^workdir: (.+)$",
+                          log.read_text(errors="replace"), re.M)
+        if match:
+            run["workdir"] = match.group(1).strip()
             self._write(run)
-
-    def _derive_attach(self, run: dict, state: dict) -> str:
-        """Fallback (b): derive trajectory events from an existing workdir's
-        artifacts — round_N.py files, GATE: lines, the trace's result."""
-        workdir = run.get("workdir")
-        if not workdir or not Path(workdir).exists():
-            return ""
-        events_path = self._run_dir(run["id"]) / "events.jsonl"
-        existing = {event.get("round") for _, event in self.read_events(run["id"])
-                    if event.get("type") == "round_saved"}
-        with events_path.open("a") as out:
-            for path in sorted(Path(workdir).glob("round_*.py"),
-                               key=lambda p: int(p.stem.split("_")[1])):
-                number = int(path.stem.split("_")[1])
-                if number in existing:
-                    continue
-                code = path.read_text()
-                out.write(json.dumps({
-                    "type": "round_saved", "ts": _now(), "round": number,
-                    "kind": ("probe" if code.lstrip().splitlines()[:1]
-                             == ["# probe"] else "script"),
-                    "path": path.name}) + "\n")
-                gate_out = Path(workdir) / f"gate_round_{number}.out"
-                if gate_out.exists():
-                    match = re.search(r"^GATE:(\{.*\})$", gate_out.read_text(
-                        errors="replace"), re.M)
-                    if match:
-                        out.write(json.dumps({
-                            "type": "gate", "ts": _now(), "round": number,
-                            "verdict": json.loads(match.group(1))}) + "\n")
-                out.flush()
-        trace = Path(workdir) / "trace.log"
-        if trace.exists():
-            text = trace.read_text(errors="replace")
-            if "VERIFIED parser saved" in text or "VERIFIED (not saved" in text:
-                state["done"], state["failed"] = True, False
-                key_match = re.search(r"VERIFIED parser saved: .*/(\S+)\.py",
-                                      text)
-                run["converged_key"] = (key_match.group(1)
-                                        if key_match
-                                        else _key_from_workdir(Path(workdir))
-                                        or run.get("key"))
-                with events_path.open("a") as out:  # terminal event for SSE
-                    out.write(json.dumps({"type": "converged", "ts": _now(),
-                                          "key": run["converged_key"]}) + "\n")
-                return "converged"
-            if re.search(r"\[.*\] result\n-+\nFAILED", text):
-                state["done"], state["failed"] = True, True
-                with events_path.open("a") as out:
-                    out.write(json.dumps({"type": "failed", "ts": _now(),
-                                          "reason": "run finished "
-                                          "(derived from trace.log)"}) + "\n")
-                return "failed"
-        return ""
 
     def _finish(self, run: dict, status: str, exit_code: int | None = None):
         run["status"] = status
@@ -448,19 +509,6 @@ class RunManager:
                     outcomes.append({"id": sid, "status": "failed"})
         run["auto_parse"] = outcomes
         self._write(run)
-
-
-def _key_from_workdir(workdir: Path) -> str | None:
-    """KEY = "…" out of the workdir's converged artifacts (verified.py from a
-    --no-save run, or the newest round script)."""
-    for name in ("verified.py",):
-        path = workdir / name
-        if path.exists():
-            match = re.search(r'^KEY\s*=\s*["\']([^"\']+)["\']',
-                              path.read_text(errors="replace"), re.M)
-            if match:
-                return match.group(1)
-    return None
 
 
 def _pid_alive(pid: int) -> bool:

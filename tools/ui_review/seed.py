@@ -1,9 +1,11 @@
 """Seed the review-tour data through the app's real code paths (run from
 the repo root): three accounts with parsed/failed statements plus two
-distill runs (one converged with auto-parse, one failed with live probe
-selections for the overlay). Writes data/review-manifest.json for the tour
-script. run_tour.sh wipes state BEFORE the server starts; this script
-never deletes anything (it once ate a live account mid-demo).
+distill runs — one converged with auto-parse (canned registry parser), one
+FAILED attached to a synthetic agent workdir whose trace.log carries the
+full trajectory vocabulary (tool chips, looks that paint the PDF overlay,
+write/edit snapshots, gates, loop abort). Writes data/review-manifest.json
+for the tour script. run_tour.sh wipes state BEFORE the server starts;
+this script never deletes anything (it once ate a live account mid-demo).
 
     uv run --group web python tools/ui_review/seed.py
 """
@@ -45,7 +47,7 @@ def create(client, name, key=""):
     response = client.post("/accounts", data={"display_name": name,
                                               "registry_key": key},
                            headers=JSON)
-    assert response.status_code in (200, 303), response.text
+    assert response.status_code in (200, 201, 303), response.text
 
 
 def wait_terminal(client, run_id, timeout=120):
@@ -58,6 +60,72 @@ def wait_terminal(client, run_id, timeout=120):
     raise SystemExit(f"run {run_id} did not terminate")
 
 
+RULE = "=" * 78
+DASH = "-" * 78
+
+
+def _section(name: str, body: str = "") -> str:
+    return f"\n{RULE}\n[10:00:00] {name}\n{DASH}\n{body}\n"
+
+
+def synthetic_failed_trace() -> str:
+    """A believable agent arc that ends FAILED: looks at the header and the
+    table, drafts a parser, gates it, chases one reconcile error, then dies
+    in a duplicate-call loop. Line indices match the bluelantern fixture."""
+    code_v1 = ('KEY = "us__harbour_import__checking__1"\n'
+               'def parse(frames):\n    return {"transactions": []}\n')
+    old = '{"transactions": []}'
+    new = '{"transactions": [], "opening_balance": 0.0}'
+    code_v2 = code_v1.replace(old, new)
+    return "".join([
+        _section("run start",
+                 "mode=demo-model at http://demo/v1\npdfs=['blue.pdf']"),
+        _section("frames", "1 statement(s); blue.pdf: 24 lines"),
+        _section("tool call: grep", '{"pattern": "Account|Balance"}'),
+        _section("tool result: grep", json.dumps({
+            "hits": [[0, "Blue Lantern Savings Bank"], [2, "Account Number"],
+                     [6, "Balance"]], "count": 3})),
+        "turn 1: look · 4k chars\n",
+        _section("tool call: render", '{"start": 0, "n": 12}'),
+        _section("tool result: render", "[Page 0]\n000 | Blue Lantern..."),
+        _section("tool call: table",
+                 '{"header_index": 8, "stop_terms": ["Page "]}'),
+        _section("tool result: table",
+                 json.dumps({"columns": ["Date", "Description", "Amount"],
+                             "row_count": 14, "rows_shown": 14, "rows": []})),
+        "turn 2: look · 11k chars\n",
+        _section("tool call: write", json.dumps({"content": code_v1})),
+        _section("write parser.py", code_v1),
+        _section("tool result: write", "wrote parser.py (3 lines)\nlint: OK"),
+        _section("tool call: run", "{}"),
+        _section("tool result: run", "0/1 statements reconcile"),
+        _section("parser.py statementledger gate", "exit 0\n" + json.dumps({
+            "key": "us__harbour_import__checking__1", "stage": "parse",
+            "clean": 0, "verified": False, "results": [{
+                "name": "blue.pdf", "ok": False, "rows": 0,
+                "error": "reconcile broke: opening 0.00 + txns 0.00 "
+                         "!= closing 2714.83"}]})),
+        "turn 3: 0/1 clean · 14k chars\n",
+        "turn 3: duplicate run call (first at turn 3)\n",
+        _section("tool call: edit",
+                 json.dumps({"old": old, "new": new})),
+        _section("edit parser.py", f"- {old!r}\n+ {new!r}"),
+        _section("tool result: edit", "replaced 1 occurrence\nlint: OK"),
+        _section("tool call: run", "{}"),
+        _section("tool result: run", "0/1 statements reconcile"),
+        _section("parser.py statementledger gate", "exit 0\n" + json.dumps({
+            "key": "us__harbour_import__checking__1", "stage": "parse",
+            "clean": 0, "verified": False, "results": [{
+                "name": "blue.pdf", "ok": False, "rows": 0,
+                "error": "reconcile broke: opening 0.00 + txns 0.00 "
+                         "!= closing 2714.83"}]})),
+        "turn 4: 0/1 clean · 17k chars\n",
+        "turn 4: REFUSED duplicate python call (x3)\n",
+        "turn 4: loop abort — 3 consecutive turns of refused duplicate calls\n",
+        _section("result", "FAILED (not verified)"),
+    ])
+
+
 DEMO_SLUGS = ("blue-lantern-savings", "copper-kettle-checking",
               "harbour-import-attempts", "run-lab", "probe-playground")
 
@@ -65,17 +133,6 @@ DEMO_SLUGS = ("blue-lantern-savings", "copper-kettle-checking",
 def main() -> None:
     data_root = Path(os.environ.get("STMTLEDGER_WEB_DATA",
                                     str(REPO / "data")))
-
-    # A canned PROBE script for the failed run (its selections paint the
-    # overlay); the registry module itself converges the other run.
-    probe_script = data_root / "review_canned_probe.py"
-    probe_script.parent.mkdir(exist_ok=True)
-    probe_script.write_text(
-        '# probe\nimport statementledger as pl\n'
-        'lines = pl.load_frames()[0]["lines"]\n'
-        'pl.show(lines, 10)\n'
-        'print(\'SELECT:{"page": 0, "lines": [0, 10], '
-        '"label": "statement header + table top"}\')\n')
 
     client = TestClient(create_app(data_root=data_root,
                                    harness_script=CANNED_FULL))
@@ -102,17 +159,23 @@ def main() -> None:
 
     converged = client.post("/runs", json={
         "account_slug": "run-lab", "statement_ids": [lab["id"]],
-        "mode": "draft", "rounds": 1}, headers=JSON).json()
+        "mode": "draft"}, headers=JSON).json()
     run_converged = wait_terminal(client, converged["run_id"])
     assert run_converged["status"] == "converged", run_converged
 
-    probe_client = TestClient(create_app(data_root=data_root,
-                                         harness_script=probe_script))
-    failed_run = probe_client.post("/runs", json={
+    # the FAILED run: attach to a synthetic agent workdir — a complete
+    # trajectory (tools, looks, snapshots, gates, loop abort) with no LLM
+    workdir = data_root / "review-agent-workdir"
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "trace.log").write_text(synthetic_failed_trace())
+    (workdir / "parser.py").write_text(
+        'KEY = "us__harbour_import__checking__1"\n'
+        'def parse(frames):\n    return {"transactions": []}\n')
+    failed_run = client.post("/runs", json={
         "account_slug": "harbour-import-attempts",
         "statement_ids": [failed["id"]], "mode": "draft",
-        "rounds": 2}, headers=JSON).json()
-    run_failed = wait_terminal(probe_client, failed_run["run_id"])
+        "workdir": str(workdir)}, headers=JSON).json()
+    run_failed = wait_terminal(client, failed_run["run_id"])
     assert run_failed["status"] == "failed", run_failed
 
     manifest = {
