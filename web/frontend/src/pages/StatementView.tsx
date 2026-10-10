@@ -134,9 +134,11 @@ export default function StatementView() {
           ← {accountData?.account.display_name ?? slug}
         </Link>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-semibold tracking-tight">{meta.original_filename}</h1>
-            <StatusChip status={meta.status} />
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
+            <h1 className="min-w-0 break-words text-2xl font-semibold tracking-tight">
+              {meta.original_filename}
+            </h1>
+            <StatusChip status={meta.status} className="shrink-0" />
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {parsed ? (

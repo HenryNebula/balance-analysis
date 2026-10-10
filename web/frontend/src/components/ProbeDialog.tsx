@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import {
   Dialog,
@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { Loader2, ScanSearch } from "lucide-react"
+import { toast } from "sonner"
 import { api } from "@/lib/api"
 import type { ProbeOutcome } from "@/lib/types"
 import { useSetKey } from "@/lib/hooks"
@@ -33,6 +34,7 @@ export function ProbeDialog({
   const [busy, setBusy] = useState(false)
   const [outcome, setOutcome] = useState<ProbeOutcome | null>(null)
   const [file, setFile] = useState<File | null>(null)
+  const resultsRef = useRef<HTMLDivElement>(null)
   const pin = useSetKey(slug)
   const navigate = useNavigate()
 
@@ -40,9 +42,17 @@ export function ProbeDialog({
     setBusy(true)
     setOutcome(null)
     try {
-      setOutcome(
-        sid ? await api.probeStored(slug, sid) : await api.probeFile(slug, file!),
+      const result = sid
+        ? await api.probeStored(slug, sid)
+        : await api.probeFile(slug, file!)
+      setOutcome(result)
+      // probes finish in milliseconds — the outcome renders below the
+      // button, so bring it into view or the click looks like a no-op
+      requestAnimationFrame(() =>
+        resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }),
       )
+    } catch (e: any) {
+      toast.error(`Probe failed: ${String(e.detail ?? e.message ?? e)}`)
     } finally {
       setBusy(false)
     }
@@ -74,10 +84,10 @@ export function ProbeDialog({
         )}
         <Button size="sm" disabled={busy || (!sid && !file)} onClick={run}>
           {busy ? <Loader2 className="animate-spin" /> : null}
-          {busy ? "Probing…" : "Run probe"}
+          {busy ? "Probing…" : outcome ? "Re-run probe" : "Run probe"}
         </Button>
         {outcome ? (
-          <div className="space-y-3">
+          <div ref={resultsRef} className="space-y-3">
             <div className="text-sm">
               <span className="font-medium">{outcome.verified_count}</span> parser
               {outcome.verified_count === 1 ? "" : "s"} verified
@@ -96,7 +106,7 @@ export function ProbeDialog({
                 <TableBody>
                   {outcome.results.map((r) => (
                     <TableRow key={r.key}>
-                      <TableCell className="font-mono text-xs">{r.key}</TableCell>
+                      <TableCell className="break-all font-mono text-xs">{r.key}</TableCell>
                       <TableCell>
                         {r.ok ? (
                           <Badge variant="secondary" className="bg-emerald-600/10 text-emerald-700 dark:text-emerald-400">

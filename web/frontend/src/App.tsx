@@ -12,7 +12,7 @@ function Layout() {
   const { pathname } = useLocation()
   const link = (active: boolean) =>
     cn(
-      "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+      "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-colors",
       active
         ? "bg-secondary text-secondary-foreground"
         : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -22,7 +22,8 @@ function Layout() {
   return (
     <div className="min-h-svh">
       <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-6xl items-center gap-6 px-6">
+        {/* wraps to two rows on phones — the nav must never widen the page */}
+        <div className="mx-auto flex min-h-14 max-w-6xl flex-wrap items-center gap-x-6 gap-y-1 px-4 py-2 sm:px-6">
           <Link to="/" className="flex items-center gap-2 font-semibold tracking-tight">
             <BookOpenCheck className="size-4.5 text-primary" />
             statementledger
