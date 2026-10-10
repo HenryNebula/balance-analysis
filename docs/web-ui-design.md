@@ -915,3 +915,12 @@ fresh-eyes reviewer, verdict ladder):
 Tour harness: `tools/ui_review/spa_check.mjs` (playwright walk-through, fails
 on console errors); DOM assertions in `check_th.mjs`; prompts
 `prompt-spa-r{1..4}.txt`.
+
+**2026-10-10 — Jinja UI retired.** The React SPA is the only UI, served at `/`
+(assets under `/assets`, history fallback for unknown browser GETs, JSON 404s
+for API clients, legacy `/app/*` links 308 to root). The server is a pure JSON
+API that content-negotiates by Accept header — the SPA's fetches and browsers
+share the same URLs. `web/templates/` and `web/static/` are deleted; htmx
+response handling is gone. Malformed statement ids now 400 instead of leaking
+a store ValueError as a 500. Suite: 91 (SPA-shell tests skip when the bundle
+isn't built).

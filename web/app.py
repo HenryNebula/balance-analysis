@@ -1,4 +1,4 @@
-"""statementledger web UI — local, single-user, zero-database.
+"""statementledger web app — local, single-user, zero-database.
 
 A thin, honest wrapper around the statementledger library (docs/web-ui-design.md):
 accounts are folders, uploads are content-addressed statement folders, parsing
@@ -8,15 +8,18 @@ verification failures are first-class UI citizens with per-parser attempts.
 Run from the repo root:
 
     uv sync --group web
+    cd web/frontend && npm ci && npm run build   # the UI (React SPA)
     uv run --group web uvicorn web.app:app --host 127.0.0.1 --port 8765
+
+The React SPA (web/frontend) is the only UI; the server is its JSON API.
+Page routes serve the SPA shell to browsers (Accept: text/html) and JSON to
+the app's fetches (Accept: application/json) — same URLs, content-negotiated,
+so deep links and refresh work without hash routing. Protocol errors use real
+status codes with JSON bodies; domain outcomes — "parsed", "no parser
+verified", "duplicate" — carry a status in the body.
 
 Deliberately localhost-only with no auth (§10): statements are sensitive
 financial data — do not port-forward, do not run on a shared host.
-
-Response convention (§4): routes return HTML fragments for htmx and JSON when
-the request Accepts it; protocol errors use real status codes (htmx is
-configured in base.html to swap 4xx fragments); domain outcomes — "parsed",
-"no parser verified", "duplicate" — carry a status in the body.
 """
 
 from __future__ import annotations
@@ -32,10 +35,9 @@ from pathlib import Path
 import statementledger as sl
 from fastapi import (FastAPI, File, Form, HTTPException, Request,
                      UploadFile)
-from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+from fastapi.responses import (FileResponse, JSONResponse,
                                RedirectResponse, Response, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
-from jinja2 import Environment, FileSystemLoader
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
@@ -162,38 +164,32 @@ def create_app(data_root: Path | None = None,
                   openapi_url=None, lifespan=lifespan)
 
     here = Path(__file__).parent
-    env = Environment(loader=FileSystemLoader(here / "templates"),
-                      autoescape=True)
-    env.globals["registry_count"] = lambda: len(sl.keys())
-    env.filters["money"] = lambda v: "—" if v is None else f"{v:,.2f}"
-    env.filters["signed"] = (
-        lambda v: "—" if v is None
-        else (f"+ {v:,.2f}" if v >= 0 else f"- {abs(v):,.2f}"))
-    env.filters["dt"] = lambda iso: (iso or "")[:16].replace("T", " ")
-    env.filters["mask"] = (
-        lambda s: "····" + s[-4:] if s and len(s) > 4 else (s or ""))
-    env.filters["period"] = (
-        lambda p: "—" if not p
-        else p["start"][:7] if p["start"][:7] == p["end"][:7]
-        else f'{p["start"]} → {p["end"]}')
 
-    def render(template: str, request: Request, status: int = 200,
-               headers: dict | None = None, **context) -> HTMLResponse:
-        html = env.get_template(template).render(request=request, **context)
-        return HTMLResponse(html, status_code=status, headers=headers)
+    # The UI is the built React SPA (web/frontend/dist). Browser GETs on page
+    # routes get its shell (deep links resolve client-side); the SPA's own
+    # fetches send Accept: application/json and get the API.
+    dist = here / "frontend" / "dist"
+
+    def spa(request: Request) -> Response:
+        if (dist / "index.html").exists():
+            # Shell and API share URLs (content-negotiated): without these
+            # headers the browser serves the cached shell to the SPA's JSON
+            # fetches and `data.map` dies on an HTML string.
+            return FileResponse(
+                dist / "index.html",
+                headers={"Cache-Control": "no-store", "Vary": "Accept"})
+        return JSONResponse(
+            {"detail": "web UI not built — cd web/frontend && npm ci && "
+                       "npm run build (see tools/serve_web.sh)"},
+            status_code=503)
 
     def wants_json(request: Request) -> bool:
-        return ("application/json" in request.headers.get("accept", "")
-                and not request.headers.get("hx-request"))
+        return "application/json" in request.headers.get("accept", "")
 
-    # Page-worthy errors render as HTML for browsers, JSON for API clients.
     @app.exception_handler(HTTPException)
     def http_error(request: Request, exc: HTTPException):
-        if wants_json(request):
-            return JSONResponse({"detail": exc.detail},
-                                status_code=exc.status_code)
-        return render("error.html", request, status=exc.status_code,
-                      code=exc.status_code, message=exc.detail)
+        return JSONResponse({"detail": exc.detail},
+                            status_code=exc.status_code)
 
     def require_account(slug: str) -> dict:
         account = store.get_account(slug)
@@ -201,61 +197,49 @@ def create_app(data_root: Path | None = None,
             raise HTTPException(404, f"no account {slug!r}")
         return account
 
-    # -- account rows (shared by / and the create-account error path) --------
+    def require_statement(slug: str, sid: str) -> dict:
+        """Meta for a stored statement; malformed ids are 400s (a store
+        ValueError must never leak as a 500), unknown ones 404s."""
+        try:
+            meta = store.statement_meta(slug, sid)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+        if meta is None:
+            raise HTTPException(404, f"no statement {sid!r} in {slug!r}")
+        return meta
 
-    def _account_rows() -> list[dict]:
+    # -- account rows (the index payload) --------------------------------------
+
+    def _account_rows_json() -> list[dict]:
         rows = []
         for account in store.accounts():
             metas = store.statements(account["slug"])
             parsed = [m for m in metas if m["status"] == "parsed"]
-            latest = parsed[-1] if parsed else None
             rows.append({
-                "account": account, "metas": metas, "parsed": len(parsed),
+                "account": account, "total": len(metas),
+                "parsed": len(parsed),
                 "failed": sum(1 for m in metas if m["status"] == "failed"),
-                "latest": latest,
-                "ledger": (store.statement_ledger(account["slug"],
-                                                  latest["id"])
-                           if latest else None),
+                "latest": parsed[-1] if parsed else None,
                 "chain": ledger.chain(metas, sl.TOL),
                 "updated": max((m["uploaded_at"] for m in metas),
                                default=None)})
         rows.sort(key=lambda r: r["account"]["display_name"].lower())
         return rows
 
-    def _account_rows_json() -> list[dict]:
-        """Compact rows for the SPA: no full metas/ledger payloads."""
-        return [{
-            "account": row["account"], "total": len(row["metas"]),
-            "parsed": row["parsed"], "failed": row["failed"],
-            "latest": row["latest"], "chain": row["chain"],
-            "updated": row["updated"],
-        } for row in _account_rows()]
-
-    def _latest_ledger(slug: str) -> dict | None:
-        for meta in reversed(store.statements(slug)):
-            if meta["status"] == "parsed":
-                return store.statement_ledger(slug, meta["id"])
-        return None
-
     # -- pages ---------------------------------------------------------------
 
-    @app.get("/", response_class=HTMLResponse)
+    @app.get("/")
     def index(request: Request):
         if wants_json(request):
             return JSONResponse({"accounts": _account_rows_json()})
-        return render("accounts.html", request, accounts=_account_rows(),
-                      keys=sl.keys(), error=None)
+        return spa(request)
 
     @app.post("/accounts")
     def create_account(request: Request, display_name: str = Form(""),
                        registry_key: str = Form("")):
 
         def fail(status: int, message: str):
-            if wants_json(request):
-                return JSONResponse({"detail": message}, status_code=status)
-            return render("accounts.html", request, status=status,
-                          accounts=_account_rows(), keys=sl.keys(),
-                          error=message)
+            return JSONResponse({"detail": message}, status_code=status)
 
         name = display_name.strip()
         if not name:
@@ -269,56 +253,35 @@ def create_app(data_root: Path | None = None,
             return fail(409, f"An account already exists for {name!r}.")
         except ValueError as error:  # name yields no usable slug
             return fail(400, str(error))
-        target = f"/accounts/{account['slug']}"
-        if wants_json(request):
-            return JSONResponse(account, status_code=201)
-        if request.headers.get("hx-request"):
-            return Response(status_code=200, headers={"HX-Redirect": target})
-        return RedirectResponse(target, status_code=303)
+        return JSONResponse(account, status_code=201)
 
-    @app.get("/accounts/{slug}", response_class=HTMLResponse)
+    @app.get("/accounts/{slug}")
     def account_detail(slug: str, request: Request):
         account = require_account(slug)
         metas = store.statements(slug)
         _load_llm_env(repo_root)
-        runs_rows = _enriched_runs(_account_runs(slug))
         if wants_json(request):
             return JSONResponse({
                 "account": account, "metas": metas,
                 "chain": ledger.chain(metas, sl.TOL),
                 "warnings": ledger.period_warnings(metas),
-                "runs": runs_rows,
+                "runs": _enriched_runs(_account_runs(slug)),
                 "llm_model": os.environ.get(
                     "STATEMENTLEDGER_LLM_MODEL", "")})
-        return render("account.html", request, account=account, metas=metas,
-                      ledger=_latest_ledger(slug), keys=sl.keys(),
-                      outcome=None, error=None,
-                      chain=ledger.chain(metas, sl.TOL),
-                      warnings=ledger.period_warnings(metas),
-                      runs=runs_rows,
-                      llm_model=os.environ.get(
-                          "STATEMENTLEDGER_LLM_MODEL", ""))
+        return spa(request)
 
     @app.delete("/accounts/{slug}")
     def delete_account(slug: str, request: Request):
         require_account(slug)
         store.delete_account(slug)
-        return Response(status_code=204, headers={"HX-Redirect": "/"})
+        return Response(status_code=204)
 
     @app.post("/accounts/{slug}/key")
     def set_key(slug: str, request: Request, registry_key: str = Form("")):
         account = require_account(slug)
 
         def fail(status: int, message: str):
-            if wants_json(request):
-                return JSONResponse({"detail": message}, status_code=status)
-            metas = store.statements(slug)
-            return render("account.html", request, status=status,
-                          account=account, metas=metas,
-                          ledger=_latest_ledger(slug), keys=sl.keys(),
-                          outcome=None, error=message,
-                          chain=ledger.chain(metas, sl.TOL),
-                          warnings=ledger.period_warnings(metas))
+            return JSONResponse({"detail": message}, status_code=status)
 
         key = registry_key.strip() or None
         if key is not None and key not in sl.keys():
@@ -326,17 +289,9 @@ def create_app(data_root: Path | None = None,
         account["registry_key"] = key
         account["registry_key_source"] = "user-pinned" if key else None
         store.update_account(account)
-        target = f"/accounts/{slug}"
-        if wants_json(request):
-            return JSONResponse(account)
-        if request.headers.get("hx-request"):
-            return Response(status_code=200, headers={"HX-Redirect": target})
-        return RedirectResponse(target, status_code=303)
+        return JSONResponse(account)
 
     # -- statements ----------------------------------------------------------
-
-    def _pdf_rel(slug: str, sid: str) -> str:
-        return f"data/accounts/{slug}/statements/{sid}/original.pdf"
 
     def _run_parse(account: dict, sid: str, key_override: str | None):
         """Parse a stored PDF with the account pin (or an override), persist
@@ -360,35 +315,24 @@ def create_app(data_root: Path | None = None,
                                      result["note"])
             outcome = {"kind": "failed", "statement": meta,
                        "attempts": result["attempts"], "note": result["note"],
-                       "pdf_rel": _pdf_rel(account["slug"], sid),
                        "pinned": bool(account.get("registry_key"))}
         return outcome
 
-    def _statements_region(request: Request, slug: str, outcome: dict,
-                           status: int):
-        if wants_json(request):
-            if "report" in outcome:  # re-parse-all: one report, not per-file
-                return JSONResponse(
-                    {"status": "ok", "changed": outcome["changed"],
-                     "results": outcome["report"]}, status_code=status)
-            statement = outcome["statement"]
-            body = {"status": outcome["kind"], "id": statement["id"],
-                    "period": statement["period"],
-                    "summary": statement["summary"]}
-            for extra in ("key", "attempts", "note", "suggest_pin",
-                          "ambiguous", "pinned"):
-                if outcome.get(extra) is not None:
-                    body[extra] = outcome[extra]
-            return JSONResponse(body, status_code=status)
-        metas = store.statements(slug)
-        _load_llm_env(repo_root)
-        return render("statements_region.html", request, status=status,
-                      account=store.get_account(slug), metas=metas,
-                      outcome=outcome, ledger=_latest_ledger(slug),
-                      warnings=ledger.period_warnings(metas),
-                      chain=ledger.chain(metas, sl.TOL),
-                      llm_model=os.environ.get(
-                          "STATEMENTLEDGER_LLM_MODEL", ""))
+    def _outcome_json(outcome: dict, status: int) -> JSONResponse:
+        """The upload/re-parse domain outcome as the SPA expects it."""
+        if "report" in outcome:  # re-parse-all: one report, not per-file
+            return JSONResponse(
+                {"status": "ok", "changed": outcome["changed"],
+                 "results": outcome["report"]}, status_code=status)
+        statement = outcome["statement"]
+        body = {"status": outcome["kind"], "id": statement["id"],
+                "period": statement["period"],
+                "summary": statement["summary"]}
+        for extra in ("key", "attempts", "note", "suggest_pin",
+                      "ambiguous", "pinned"):
+            if outcome.get(extra) is not None:
+                body[extra] = outcome[extra]
+        return JSONResponse(body, status_code=status)
 
     @app.post("/accounts/{slug}/statements")
     def upload_statement(slug: str, request: Request,
@@ -396,15 +340,7 @@ def create_app(data_root: Path | None = None,
         account = require_account(slug)
 
         def error(status: int, message: str):
-            if wants_json(request):
-                return JSONResponse({"detail": message}, status_code=status)
-            metas = store.statements(slug)
-            return render("statements_region.html", request, status=status,
-                          account=account, metas=metas,
-                          outcome={"kind": "error", "message": message},
-                          ledger=_latest_ledger(slug),
-                          warnings=ledger.period_warnings(metas),
-                          chain=ledger.chain(metas, sl.TOL))
+            return JSONResponse({"detail": message}, status_code=status)
 
         if file is None or not file.filename:
             return error(400, "No file was uploaded.")
@@ -425,17 +361,16 @@ def create_app(data_root: Path | None = None,
             except DuplicateStatement:
                 outcome = {"kind": "duplicate",
                            "statement": store.statement_meta(slug, sid)}
-                return _statements_region(request, slug, outcome, 409)
+                return _outcome_json(outcome, 409)
             outcome = _run_parse(account, sid, None)
-        return _statements_region(request, slug, outcome,
-                                  201 if outcome["kind"] == "parsed" else 200)
+        return _outcome_json(outcome,
+                             201 if outcome["kind"] == "parsed" else 200)
 
     @app.post("/accounts/{slug}/statements/{sid}/parse")
     def reparse_statement(slug: str, sid: str, request: Request,
-                          key: str = Form(""), back_to: str = Form("")):
+                          key: str = Form("")):
         account = require_account(slug)
-        if not store.statement_exists(slug, sid):
-            raise HTTPException(404, f"no statement {sid!r} in {slug!r}")
+        require_statement(slug, sid)
         key_override = key.strip() or None
         if key_override and key_override not in sl.keys():
             raise HTTPException(400, f"{key_override!r} is not a registered "
@@ -443,18 +378,12 @@ def create_app(data_root: Path | None = None,
         with store.account_lock(slug):
             account = store.get_account(slug)  # re-read under the lock
             outcome = _run_parse(account, sid, key_override)
-        # A plain form post (statement page) redirects back to its page.
-        if (back_to.startswith("/") and not wants_json(request)
-                and not request.headers.get("hx-request")):
-            return RedirectResponse(back_to, status_code=303)
-        return _statements_region(request, slug, outcome, 200)
+        return _outcome_json(outcome, 200)
 
-    @app.get("/accounts/{slug}/statements/{sid}", response_class=HTMLResponse)
+    @app.get("/accounts/{slug}/statements/{sid}")
     def statement_detail(slug: str, sid: str, request: Request):
         account = require_account(slug)
-        meta = store.statement_meta(slug, sid)
-        if meta is None:
-            raise HTTPException(404, f"no statement {sid!r} in {slug!r}")
+        meta = require_statement(slug, sid)
         ledger = store.statement_ledger(slug, sid)
         verified = sl.reconcile_statement(ledger) is None if ledger else None
         _load_llm_env(repo_root)
@@ -478,11 +407,7 @@ def create_app(data_root: Path | None = None,
                                  "verified": verified,
                                  "prov_pages": prov_pages,
                                  "llm_model": llm_model})
-        return render("statement.html", request, account=account, meta=meta,
-                      ledger=ledger, verified=verified,
-                      pdf_rel=_pdf_rel(slug, sid),
-                      prov_pages=prov_pages,
-                      llm_model=llm_model)
+        return spa(request)
 
     @app.get("/accounts/{slug}/statements/{sid}/original.pdf")
     def original_pdf(slug: str, sid: str, request: Request):
@@ -498,7 +423,10 @@ def create_app(data_root: Path | None = None,
     @app.delete("/accounts/{slug}/statements/{sid}")
     def delete_statement(slug: str, sid: str, request: Request):
         require_account(slug)
-        store.delete_statement(slug, sid)
+        try:
+            store.delete_statement(slug, sid)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
         return Response(status_code=204)
 
     # -- probe / re-parse-all / exports (Phase 2, §7.3–§7.4) -----------------
@@ -540,13 +468,9 @@ def create_app(data_root: Path | None = None,
                 parsing.probe_all, store.original_pdf(slug, sid))
         verified = outcome["verified_keys"]
         suggested = verified[0] if len(verified) == 1 else None
-        if wants_json(request):
-            return {"results": outcome["results"],
-                    "verified_count": len(verified),
-                    "suggested_key": suggested, "note": outcome["note"]}
-        return render("probe.html", request, account=account,
-                      results=outcome["results"], verified=verified,
-                      suggested=suggested, note=outcome["note"])
+        return {"results": outcome["results"],
+                "verified_count": len(verified),
+                "suggested_key": suggested, "note": outcome["note"]}
 
     @app.post("/accounts/{slug}/reparse")
     def reparse_all(slug: str, request: Request):
@@ -572,9 +496,9 @@ def create_app(data_root: Path | None = None,
                                                  result["attempts"],
                                                  result["note"])
                 report.append(ledger.drift(meta, new_meta))
-        outcome = {"kind": "report", "key": key, "report": report,
-                   "changed": any(entry["changed"] for entry in report)}
-        return _statements_region(request, slug, outcome, 200)
+        changed = any(entry["changed"] for entry in report)
+        return _outcome_json({"kind": "report", "key": key, "report": report,
+                              "changed": changed}, 200)
 
     @app.get("/accounts/{slug}/statements/{sid}/ledger.json")
     def statement_ledger_json(slug: str, sid: str, request: Request):
@@ -619,9 +543,11 @@ def create_app(data_root: Path | None = None,
                  "statements": parsed_counts[key]}
                 for key in sl.keys()]
 
-    @app.get("/registry", response_class=HTMLResponse)
+    @app.get("/registry")
     def registry_page(request: Request):
-        return render("registry.html", request, rows=_registry_rows())
+        if wants_json(request):
+            return JSONResponse(_registry_rows())
+        return spa(request)
 
     @app.get("/registry.json")
     def registry_json():
@@ -631,8 +557,7 @@ def create_app(data_root: Path | None = None,
 
     def _statement_paths(slug: str, sid: str) -> tuple[dict, Path]:
         account = require_account(slug)
-        if not store.statement_exists(slug, sid):
-            raise HTTPException(404, f"no statement {sid!r} in {slug!r}")
+        require_statement(slug, sid)
         return account, store.original_pdf(slug, sid)
 
     @app.get("/accounts/{slug}/statements/{sid}/pages/{page}.png")
@@ -710,22 +635,16 @@ def create_app(data_root: Path | None = None,
         except RunError as error:
             status = 409 if "already active" in str(error) else 400
             raise HTTPException(status, str(error))
-        target = f"/runs/{run['id']}"
-        if request.headers.get("hx-request"):
-            return Response(status_code=200,
-                            headers={"HX-Redirect": target})
-        if wants_json(request):
-            return JSONResponse({"run_id": run["id"]}, status_code=202)
-        return RedirectResponse(target, status_code=303)
+        return JSONResponse({"run_id": run["id"]}, status_code=202)
 
-    @app.get("/runs", response_class=HTMLResponse)
+    @app.get("/runs")
     def runs_list(request: Request):
         items = _enriched_runs(runs.list())
         if wants_json(request):
             return JSONResponse(items)
-        return render("runs.html", request, runs=items)
+        return spa(request)
 
-    @app.get("/runs/{run_id}", response_class=HTMLResponse)
+    @app.get("/runs/{run_id}")
     def run_detail(run_id: str, request: Request):
         try:
             run = runs.get(run_id)
@@ -753,10 +672,7 @@ def create_app(data_root: Path | None = None,
         run["model"] = model
         if wants_json(request):
             return JSONResponse(run)
-        config = {"id": run["id"], "slug": run["account_slug"],
-                  "sid": first_sid, "pages": page_total}
-        return render("run.html", request, run=run, account=account,
-                      model=model, pages=page_total, config=config)
+        return spa(request)
 
     @app.delete("/runs/{run_id}")
     def cancel_run(run_id: str, request: Request):
@@ -841,23 +757,23 @@ def create_app(data_root: Path | None = None,
         return [run for run in runs.list()
                 if run["account_slug"] == slug][:5]
 
-    app.mount("/static", StaticFiles(directory=here / "static"), name="static")
+    # -- SPA assets, legacy /app redirects, history fallback -------------------
+    if (dist / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=dist / "assets"),
+                  name="assets")
 
-    # -- React SPA (web/frontend, built with `npm run build`) ------------------
-    # Served at /app alongside the Jinja UI during migration; history fallback
-    # returns index.html so deep links (/app/runs/x) resolve client-side.
-    dist = here / "frontend" / "dist"
+    @app.get("/app", include_in_schema=False)
+    @app.get("/app/{rest:path}", include_in_schema=False)
+    def legacy_app_redirect(rest: str = ""):
+        return RedirectResponse(f"/{rest}", status_code=308)
 
-    if (dist / "index.html").exists():
-
-        @app.get("/app", include_in_schema=False)
-        @app.get("/app/{rest:path}", include_in_schema=False)
-        def spa(rest: str = ""):
-            candidate = (dist / rest).resolve()
-            if (rest and candidate.is_relative_to(dist)
-                    and candidate.is_file()):
-                return FileResponse(candidate)
-            return FileResponse(dist / "index.html")
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str, request: Request):
+        # unmatched GETs: browsers get the SPA shell (history fallback);
+        # API clients get a JSON 404
+        if wants_json(request):
+            raise HTTPException(404, f"no such endpoint: /{full_path}")
+        return spa(request)
 
     return app
 

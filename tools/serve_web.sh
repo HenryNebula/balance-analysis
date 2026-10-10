@@ -10,8 +10,8 @@ cd "$(dirname "$0")/.."
 
 export STMTLEDGER_WEB_DATA="${STMTLEDGER_WEB_DATA:-$HOME/.local/share/statementledger}"
 
-# Build the React SPA (served at /app) if its bundle is missing. The Jinja UI
-# at / works regardless, so a node-less machine only loses /app.
+# Build the SPA if its bundle is missing — it is the UI (served at /).
+# Without node the server is API-only (a 503 points at this script).
 if [ ! -f web/frontend/dist/index.html ] && command -v npm >/dev/null 2>&1; then
   (cd web/frontend && npm ci && npm run build)
 fi

@@ -1,4 +1,4 @@
-// SPA smoke tour (web/frontend at /app): walks the React UI end to end —
+// SPA smoke tour (web/frontend, served at /): walks the React UI end to end —
 // accounts, upload + parse, statement view, failed-state launch dialog, the
 // live run view (SSE timeline + overlay + trace), cancel — screenshotting
 // each settled state and failing on console errors. Run with the dev server
@@ -33,7 +33,7 @@ async function shot(name, opts) {
 }
 
 // -- accounts (empty) ---------------------------------------------------------
-await page.goto(`${BASE}/app`, { waitUntil: "networkidle" });
+await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
 await page.getByRole("button", { name: "New account" }).waitFor();
 await shot("01-accounts-empty");
 
@@ -125,9 +125,9 @@ await page.getByText("Cancelled.", { exact: false }).waitFor({ timeout: 30_000 }
 await shot("10-run-cancelled");
 
 // -- registry + runs list --------------------------------------------------------------
-await page.goto(`${BASE}/app/registry`, { waitUntil: "networkidle" });
+await page.goto(`${BASE}/registry`, { waitUntil: "networkidle" });
 await shot("11-registry");
-await page.goto(`${BASE}/app/runs`, { waitUntil: "networkidle" });
+await page.goto(`${BASE}/runs`, { waitUntil: "networkidle" });
 await shot("12-runs");
 
 console.log(errors.length ? `CONSOLE ERRORS:\n${errors.join("\n")}` : "no console errors");

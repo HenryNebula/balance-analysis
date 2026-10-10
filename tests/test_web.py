@@ -45,9 +45,7 @@ def test_slugify_and_id():
 
 
 def test_index_empty(client):
-    page = client.get("/")
-    assert page.status_code == 200
-    assert "No accounts yet" in page.text
+    assert client.get("/", headers=JSON).json() == {"accounts": []}
 
 
 def test_create_account(client, tmp_path):
@@ -58,7 +56,8 @@ def test_create_account(client, tmp_path):
     account = json.loads(account_file.read_text())
     assert account["registry_key"] is None
     assert account["slug"] == "blue-lantern-savings"
-    assert client.get("/").text.count('href="/accounts/blue-lantern-savings"')
+    rows = client.get("/", headers=JSON).json()["accounts"]
+    assert any(r["account"]["slug"] == "blue-lantern-savings" for r in rows)
 
 
 def test_create_account_duplicate_slug(client):
@@ -168,11 +167,12 @@ def test_upload_encrypted_pdf_gets_plain_note(client, tmp_path):
 def test_statement_detail_and_original(client):
     create(client, "Blue Lantern Savings")
     sid = upload(client, "blue-lantern-savings", BLUE).json()["id"]
-    page = client.get(f"/accounts/blue-lantern-savings/statements/{sid}")
-    assert page.status_code == 200
-    assert "RECONCILED" in page.text
+    detail = client.get(f"/accounts/blue-lantern-savings/statements/{sid}",
+                        headers=JSON).json()
+    assert detail["verified"] is True
     truth = json.loads((FIXTURES / "bluelantern_savings.truth.json").read_text())
-    assert truth["transactions"][0]["description"] in page.text
+    descriptions = [t["description"] for t in detail["ledger"]["transactions"]]
+    assert truth["transactions"][0]["description"] in descriptions
     original = client.get(
         f"/accounts/blue-lantern-savings/statements/{sid}/original.pdf")
     assert original.status_code == 200
@@ -191,8 +191,11 @@ def test_statement_404s(client):
 def test_reparse_after_repin(client):
     create(client, "Blue Lantern Savings", key=COPPER_KEY)
     sid = upload(client, "blue-lantern-savings", BLUE).json()["id"]
-    assert "pinned parser did not verify" in client.get(
-        f"/accounts/blue-lantern-savings/statements/{sid}").text.lower()
+    failed = client.get(
+        f"/accounts/blue-lantern-savings/statements/{sid}",
+        headers=JSON).json()
+    assert failed["meta"]["status"] == "failed"
+    assert failed["ledger"] is None
     # pin the right parser, then re-parse the stored PDF
     pinned = client.post("/accounts/blue-lantern-savings/key",
                          data={"registry_key": BLUE_KEY}, headers=JSON)
@@ -218,11 +221,10 @@ def test_key_override_on_reparse(client):
 def test_unpin(client):
     create(client, "Blue Lantern Savings", key=BLUE_KEY)
     response = client.post("/accounts/blue-lantern-savings/key",
-                           data={"registry_key": ""}, headers=JSON,
-                           follow_redirects=False)
-    assert response.status_code in (200, 303)
-    page = client.get("/accounts/blue-lantern-savings")
-    assert "auto-detect" in page.text
+                           data={"registry_key": ""}, headers=JSON)
+    assert response.status_code == 200
+    assert client.get("/accounts/blue-lantern-savings",
+                      headers=JSON).json()["account"]["registry_key"] is None
 
 
 def test_delete_statement(client):
@@ -252,20 +254,6 @@ def test_registry(client):
     assert keys[BLUE_KEY]["statements"] == 1  # usage counts for the SPA
     import statementledger as sl
     assert set(keys) == set(sl.keys())  # every module, docstring or not
-    page = client.get("/registry")
-    assert page.status_code == 200
-    assert BLUE_KEY in page.text
-    assert COPPER_KEY in page.text
-
-
-def test_upload_returns_htmx_fragment(client):
-    create(client, "Blue Lantern Savings")
-    response = upload(client, "blue-lantern-savings", BLUE,
-                      headers={"hx-request": "true"})
-    assert response.status_code == 201
-    assert 'id="statements-region"' in response.text
-    assert "✓ Parsed" in response.text
-    assert BLUE_KEY in response.text
 
 
 def test_two_accounts_same_pdf_allowed(client):
@@ -333,15 +321,6 @@ def test_probe_bad_payloads(client):
             "/accounts/blue-lantern-savings/probe",
             files={"file": ("x.pdf", b"not a pdf", "application/pdf")},
             headers=JSON).status_code == 400
-
-
-def test_probe_fragment_has_pin_picker(client):
-    create(client, "Blue Lantern Savings", key=COPPER_KEY)
-    sid = upload(client, "blue-lantern-savings", BLUE).json()["id"]
-    page = client.post("/accounts/blue-lantern-savings/probe",
-                       json={"statement_id": sid},
-                       headers={"hx-request": "true"})
-    assert "Pin to" in page.text and BLUE_KEY in page.text
 
 
 def test_reparse_all_report(client):
@@ -429,25 +408,22 @@ def test_chain_and_overlap_on_account_page(client):
     create(client, "Blue Lantern Savings")
     upload(client, "blue-lantern-savings", BLUE)
     upload(client, "blue-lantern-savings", COPPER)
-    page = client.get("/accounts/blue-lantern-savings")
+    detail = client.get("/accounts/blue-lantern-savings",
+                        headers=JSON).json()
     merged = client.get("/accounts/blue-lantern-savings/ledger.json").json()
-    statements = merged["statements"]  # period order, like the page
-    breaks = 0
+    statements = merged["statements"]  # period order, like the account page
     ledgers = {}
     for s in statements:
-        sid = s["id"]
-        ledgers[sid] = client.get(
-            f"/accounts/blue-lantern-savings/statements/{sid}"
+        ledgers[s["id"]] = client.get(
+            f"/accounts/blue-lantern-savings/statements/{s['id']}"
             "/ledger.json").json()
-    for prev, nxt in zip(statements, statements[1:]):
+    breaks = sum(
+        1 for prev, nxt in zip(statements, statements[1:])
         if abs(ledgers[prev["id"]]["closing_balance"]
-               - ledgers[nxt["id"]]["opening_balance"]) > 0.01:
-            breaks += 1
-    links = max(len(statements) - 1, 0)
-    if breaks == 0 and links:
-        assert f"chain ✓ ({links}/{links} links)" in page.text
-    else:
-        assert "chain break" in page.text
+               - ledgers[nxt["id"]]["opening_balance"]) > 0.01)
+    chain = detail["chain"]
+    assert chain["total"] == max(len(statements) - 1, 0)
+    assert chain["ok"] == chain["total"] - breaks
 
 
 def test_chain_pure_function():
@@ -586,8 +562,10 @@ def test_run_converges_and_auto_parses(run_client):
     # the pending statement was auto-parsed with the converged key
     assert run["auto_parse"] == [{"id": sid, "status": "parsed",
                                   "transactions": 14}]
-    page = run_client.get(f"/accounts/blue-lantern-savings/statements/{sid}")
-    assert "RECONCILED" in page.text
+    parsed = run_client.get(
+        f"/accounts/blue-lantern-savings/statements/{sid}",
+        headers=JSON).json()
+    assert parsed["verified"] is True
 
     # the trajectory is complete and relays over SSE with a run_status close
     stream = run_client.get(f"/runs/{run_id}/events")
@@ -677,16 +655,35 @@ def test_attach_to_existing_run(run_client):
     assert bad.status_code == 400
 
 
-def test_run_pages_render(run_client):
-    page = run_client.get("/runs")
-    assert page.status_code == 200
+SPA_INDEX = (Path(__file__).resolve().parents[1] / "web" / "frontend"
+             / "dist" / "index.html")
+
+
+@pytest.mark.skipif(not SPA_INDEX.exists(), reason="SPA bundle not built")
+def test_spa_shell_served(run_client):
+    """Browsers get the SPA shell on page routes and unknown GETs (history
+    fallback); API clients get JSON; legacy /app links redirect to /."""
     create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
     sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
     run_id = _launch(run_client, "blue-lantern-savings", [sid]).json()["run_id"]
     _wait_terminal(run_client, run_id)
-    view = run_client.get(f"/runs/{run_id}")
-    assert view.status_code == 200
-    assert 'id="timeline"' in view.text and "/static/run.js" in view.text
+    shell = run_client.get(f"/runs/{run_id}")
+    assert shell.status_code == 200 and 'id="root"' in shell.text
+    # unknown paths: browsers get the SPA shell (history fallback), API
+    # clients a JSON 404; malformed statement ids are 400s, not 500s
+    fallback = run_client.get("/some/unknown/path")
+    assert 'id="root"' in fallback.text
+    api404 = run_client.get("/nope", headers=JSON)
+    assert api404.status_code == 404 and api404.json()["detail"]
+    missing = run_client.get(
+        "/accounts/blue-lantern-savings/statements/" + "0" * 16, headers=JSON)
+    assert missing.status_code == 404
+    bad = run_client.get(
+        "/accounts/blue-lantern-savings/statements/0000", headers=JSON)
+    assert bad.status_code == 400
+    legacy = run_client.get(f"/app/runs/{run_id}", follow_redirects=False)
+    assert legacy.status_code == 308
+    assert legacy.headers["location"] == f"/runs/{run_id}"
 
 
 def test_statement_page_raster_and_frames(client):
@@ -704,20 +701,6 @@ def test_statement_page_raster_and_frames(client):
                         "/frames.json")
     assert frames.status_code == 200
     assert frames.json()["lines"]  # overlay geometry available
-
-
-def test_launch_dialog_on_failed_statement(client):
-    create(client, "Blue Lantern Savings", key=COPPER_KEY)
-    sid = upload(client, "blue-lantern-savings", BLUE).json()["id"]
-    page = client.get(f"/accounts/blue-lantern-savings/statements/{sid}")
-    assert "Register new bank" in page.text
-    assert "Launch run" in page.text
-    assert "maintain — evolve" in page.text  # account is pinned
-    # a fresh failed upload carries the dialog in its outcome card too
-    create(client, "Other Bank Account", key=COPPER_KEY)
-    card = upload(client, "other-bank-account", BLUE,
-                  headers={"hx-request": "true"})
-    assert "Register new bank" in card.text
 
 
 def test_prov_pages_geometry():

@@ -35,7 +35,7 @@ const { run_id } = await (await fetch(`${BASE}/runs`, {
 })).json()
 console.log("run:", run_id)
 
-await page.goto(`${BASE}/app/runs/${run_id}`, { waitUntil: "networkidle" })
+await page.goto(`${BASE}/runs/${run_id}`, { waitUntil: "networkidle" })
 await page.waitForTimeout(4000)
 
 // 1. resize: drag the separator 150px left (sidebar grows)

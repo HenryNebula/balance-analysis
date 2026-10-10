@@ -4,9 +4,9 @@ import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 
 // Dev: the SPA runs on :5173 and proxies the API to the FastAPI server.
-// Prod: `npm run build` emits dist/, which web/app.py serves at /app.
+// Prod: `npm run build` emits dist/, which web/app.py serves at /.
 export default defineConfig({
-  base: "/app/",
+  base: "/",
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: { "@": path.resolve(__dirname, "./src") },
