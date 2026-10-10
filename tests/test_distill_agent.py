@@ -182,6 +182,59 @@ def test_message_chars_counts_tool_call_arguments():
     assert agent.message_chars(messages) == 650
 
 
+def test_is_context_overflow_matches_provider_phrasings():
+    assert agent.is_context_overflow(
+        "HTTP 400: request (65631 tokens) exceeds the available context")
+    assert agent.is_context_overflow(
+        "HTTP 400: ... (context window overflow is the usual cause)")
+    assert agent.is_context_overflow(
+        "HTTP 400: This model's maximum context length is 8192 tokens")
+    assert not agent.is_context_overflow("HTTP 401: invalid api key")
+    assert not agent.is_context_overflow("HTTP 404: unknown model")
+
+
+def test_overflow_error_forces_elision_and_recovers(tmp_path):
+    """A context-overflow 400 is a compaction signal, not a dead chat: the
+    loop sheds the oldest turns hard (keep_pairs=3) and retries."""
+    ctx_frames = copper_frames()
+    (tmp_path / "frames.json").write_text(json.dumps(ctx_frames))
+    broken = PARSER.read_text().replace('"Transactions stop here."',
+                                        '"Never printed anywhere"')
+    script = [
+        call("grep", {"pattern": "stop"}, "c1"),
+        call("render", {"start": 0, "n": 5}, "c2"),
+        call("grep", {"pattern": "Account"}, "c3"),
+        call("write", {"content": broken}, "c4"),
+        call("run", {}, "c5"),                 # 0/1 clean — not verified
+        call("edit", {"old": '"Never printed anywhere"',
+                      "new": '"Transactions stop here."'}, "c6"),
+        call("run", {}, "c7"),
+    ]
+    state = {"i": 0}
+    request_chars: list[int] = []
+
+    def fake_chat(messages, tools, temperature=0.0):
+        request_chars.append(agent.message_chars(messages))
+        if len(request_chars) == 5:            # history is big enough to elide
+            raise RuntimeError(
+                "chat endpoint rejected the request: HTTP 400: "
+                "request (65631 tokens) exceeds the available context")
+        reply = script[state["i"]]
+        state["i"] += 1
+        return reply
+
+    trace = agent.Trace(tmp_path)
+    artifact, verified, history = agent.agent_loop(
+        [Path("fixture.pdf")], tmp_path, 20, trace, frames=ctx_frames,
+        chat=fake_chat, compact_chars=10**9)  # scheduled elision never fires
+    trace.close()
+    assert verified
+    assert not any("chat failed" in h.get("outcome", "") for h in history)
+    log = (tmp_path / "trace.log").read_text()
+    assert "forced elision" in log
+    assert request_chars[5] < request_chars[4]  # retry ran on less history
+
+
 def test_circuit_breaker_refuses_third_identical_call(tmp_path):
     ctx_frames = copper_frames()
     (tmp_path / "frames.json").write_text(json.dumps(ctx_frames))

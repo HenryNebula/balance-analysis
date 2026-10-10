@@ -533,6 +533,19 @@ def elide_middle(messages: list[dict], threshold: int = COMPACT_CHARS,
     return before - message_chars(messages)
 
 
+OVERFLOW_RE = re.compile(
+    r"exceeds the available context|context window overflow"
+    r"|maximum context length|context_length_exceeded|prompt is too long",
+    re.I)
+
+
+def is_context_overflow(error_text: str) -> bool:
+    """True when the endpoint rejected the request for SIZE (any provider
+    phrasing seen so far; chat_tools' own 400/413 hint matches too). The
+    cure is elision, not a retry."""
+    return bool(OVERFLOW_RE.search(error_text))
+
+
 # --- Tool catalog ------------------------------------------------------------------
 
 
@@ -967,6 +980,15 @@ def agent_loop(
         try:
             raw = chat(messages, TOOLS, temperature=escape_temperature)
         except RuntimeError as error:
+            if is_context_overflow(str(error)):
+                # the endpoint is the ground truth the char proxy guesses
+                # at — shed the oldest turns hard and retry this turn
+                saved = elide_middle(messages, threshold=0, keep_pairs=3)
+                if saved > 0:
+                    trace.log(f"turn {turn} context overflow — forced elision",
+                              f"{saved} chars saved; retrying")
+                    seen_calls.clear()  # elided turns may be needed again
+                    continue
             chat_fails += 1
             trace.log(f"turn {turn} chat failed", str(error))
             history.append({"turn": turn, "outcome": f"chat failed: {str(error)[:120]}"})
