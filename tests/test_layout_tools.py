@@ -205,6 +205,30 @@ def test_anchor_value_beside_the_label():
     assert sl.anchor_value(statement_lines(), "Account No:") == "1234 5678"
 
 
+def test_anchor_value_reads_value_merged_into_the_label_item():
+    # the extractor merges close words into one item: label and value share
+    # a single [text, x1, x2] — the value is the text AFTER the term
+    lines = [line(0, 50, ("Account No: 1234 5678", 72, 220))]
+    assert sl.anchor_value(lines, "Account No:") == "1234 5678"
+
+
+def test_anchor_value_reads_value_on_the_line_below():
+    # some templates print the value under its label; the next line is the
+    # value unless it looks like another label
+    lines = [line(0, 50, ("Account No:", 72, 130)),
+             line(0, 60, ("1234 5678", 72, 130)),
+             line(0, 80, ("Currency:", 72, 130), ("SGD", 200, 230))]
+    assert sl.anchor_value(lines, "Account No:") == "1234 5678"
+    assert sl.anchor_value(lines, "Currency:") == "SGD"  # beside still wins
+
+
+def test_anchor_value_label_stack_does_not_eat_the_next_label():
+    lines = [line(0, 50, ("Account No:", 72, 130)),
+             line(0, 60, ("Currency:", 72, 130), ("SGD", 200, 230))]
+    with pytest.raises(ValueError, match="no value beside, after, or below"):
+        sl.anchor_value(lines, "Account No:")
+
+
 def test_anchor_value_index_picks_nth_match():
     assert sl.anchor_value(statement_lines(), "Account No:", index=1) == \
         "1234 5678"  # the page-1 copy

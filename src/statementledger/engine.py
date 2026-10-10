@@ -399,38 +399,70 @@ def render_table(columns: list[str], rows: list[dict],
         print(" | ".join(cell(row, c).ljust(sizes[i]) for i, c in enumerate(cols)))
 
 
-def _values_on_line(line: dict, term: str) -> list[str] | None:
-    """Item texts strictly right of the item containing `term`, or None."""
+def _anchor_on_line(line: dict, term: str) -> str | None:
+    """The value a single line offers for `term`, in resolution order:
+    items right of the label item, else the label item's own text after
+    the term (frames extraction merges close words into one item), else
+    None."""
+    needle = term.lower()
     for text, x1, _x2 in line["items"]:
-        if term.lower() in text.lower():
-            right = [t for t, a, _b in line["items"] if a > x1]
-            if right:
-                return right
+        if needle not in text.lower():
+            continue
+        right = [t for t, a, _b in line["items"] if a > x1]
+        if right:
+            return " ".join(right)
+        tail = text[text.lower().index(needle) + len(needle):]
+        tail = tail.lstrip(" :#").strip()
+        if tail:
+            return tail
+        return None
     return None
 
 
+def _labelish(text: str) -> bool:
+    """A line that looks like another label (form blocks stack labels) —
+    not a value, so not taken as the line below a label."""
+    return bool(re.match(r"^\s*\w[\w /]{0,30}:", text))
+
+
 def anchor_value(lines: list[dict], term: str, index: int = 0) -> str:
-    """The value printed beside a label:
+    """The printed value of a label — beside it, after it in the same
+    printed run (merged items), or on the line below it:
 
         anchor_value(lines, "Account No:") -> "0123 4567 8901"
 
     Case-insensitive; index picks a later match. Raises quoting the printed
-    line when the label has nothing beside it — grep() first when unsure."""
+    line (and the line below) when the label carries no value anywhere; a
+    wrong guess lists near-miss lines — read them, or grep() first."""
+    needle = term.lower()
     seen = 0
     quoted = None
-    for line in lines:
-        values = _values_on_line(line, term)
-        if values is None:
-            if quoted is None and term.lower() in line_text(line).lower():
-                quoted = line_text(line)
+    for position, line in enumerate(lines):
+        if needle not in line_text(line).lower():
+            continue
+        value = _anchor_on_line(line, term)
+        below = lines[position + 1] if position + 1 < len(lines) else None
+        if (value is None and below is not None
+                and below["page"] == line["page"]
+                and not _labelish(line_text(below))):
+            value = line_text(below).strip() or None
+        if value is None:
+            if quoted is None:
+                quoted = (line_text(line),
+                          line_text(below) if below is not None else "")
             continue
         if seen == index:
-            return " ".join(values)
+            return value
         seen += 1
     if quoted is not None:
         raise ValueError(
-            f"{term!r} is printed with nothing beside it: {quoted!r}")
-    raise ValueError(f"label not printed anywhere: {term!r}")
+            f"{term!r} is printed but carries no value beside, after, or "
+            f"below it: {quoted[0]!r} / below: {quoted[1]!r}")
+    words = {w.strip(".,:;#").lower() for w in term.split() if len(w) >= 4}
+    near = [f"{i:03d}: {line_text(line)[:70]}" for i, line in enumerate(lines)
+            if any(w in line_text(line).lower() for w in words)][:3]
+    hint = "\n  near misses:\n  " + "\n  ".join(near) if near else ""
+    raise ValueError(f"label not printed anywhere: {term!r}{hint}")
 
 
 def regions(lines: list[dict], window: int = 6) -> list[dict]:

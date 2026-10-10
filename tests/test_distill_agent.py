@@ -81,9 +81,11 @@ def test_duplicate_call_gets_a_note_and_results_are_logged(tmp_path):
     ]
     state = {"i": 0}
     seen_tools: list[str] = []
+    temperatures: list[float] = []
 
-    def fake_chat(messages, tools):
+    def fake_chat(messages, tools, temperature=0.0):
         seen_tools.extend(m["content"] for m in messages if m["role"] == "tool")
+        temperatures.append(temperature)
         reply = script[state["i"]]
         state["i"] += 1
         return reply
@@ -96,8 +98,42 @@ def test_duplicate_call_gets_a_note_and_results_are_logged(tmp_path):
     assert verified
     assert any("identical grep call was already made (turn 1)" in c
                for c in seen_tools)
+    # the duplicate turn (call 2, executed mid-turn) armed the one-shot
+    # escape for the NEXT request (call 3), then greedy resumed
+    assert temperatures == [0.0, 0.0, 0.4, 0.0]
     log = (tmp_path / "trace.log").read_text()
     assert "tool result: grep" in log and "tool result: run" in log
+
+
+def test_circuit_breaker_refuses_third_identical_call(tmp_path):
+    ctx_frames = copper_frames()
+    (tmp_path / "frames.json").write_text(json.dumps(ctx_frames))
+    script = [
+        call("grep", {"pattern": "stop"}, "c1"),
+        call("grep", {"pattern": "stop"}, "c2"),   # repeat 1: NOTE
+        call("grep", {"pattern": "stop"}, "c3"),   # repeat 2: REFUSED
+        call("write", {"content": PARSER.read_text()}, "c4"),
+        call("run", {}, "c5"),
+    ]
+    state = {"i": 0}
+    seen_tools: list[str] = []
+
+    def fake_chat(messages, tools, temperature=0.0):
+        seen_tools.extend(m["content"] for m in messages if m["role"] == "tool")
+        reply = script[state["i"]]
+        state["i"] += 1
+        return reply
+
+    trace = agent.Trace(tmp_path)
+    artifact, verified, _ = agent.agent_loop(
+        [Path("fixture.pdf")], tmp_path, 10, trace, frames=ctx_frames,
+        chat=fake_chat)
+    trace.close()
+    assert verified
+    refused = [c for c in seen_tools if "Refusing to run it again" in c]
+    assert refused and "has already run 3 times" in refused[0]
+    log = (tmp_path / "trace.log").read_text()
+    assert "REFUSED duplicate grep" in log
 
 
 def test_render_tool_returns_wall(tmp_path):
@@ -262,7 +298,7 @@ def test_agent_loop_scripted_verified(tmp_path):
     ]
     state = {"i": 0}
 
-    def fake_chat(messages, tools):
+    def fake_chat(messages, tools, temperature=0.0):
         reply = script[state["i"]]
         state["i"] += 1
         return reply
@@ -290,7 +326,7 @@ def test_agent_loop_continues_after_failed_run(tmp_path):
     ]
     state = {"i": 0}
 
-    def fake_chat(messages, tools):
+    def fake_chat(messages, tools, temperature=0.0):
         reply = script[state["i"]]
         state["i"] += 1
         return reply
@@ -312,7 +348,7 @@ def test_agent_loop_repair_message_on_plain_text(tmp_path):
               call("grep", {"pattern": "stop"}, "c1")]
     state = {"i": 0}
 
-    def fake_chat(messages, tools):
+    def fake_chat(messages, tools, temperature=0.0):
         seen.append(messages[-1])
         if state["i"] < len(script):
             reply = script[state["i"]]

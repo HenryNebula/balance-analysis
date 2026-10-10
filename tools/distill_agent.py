@@ -89,13 +89,15 @@ AGENT_SYSTEM_PROMPT = render_prompt("agent_system.j2.md")
 # --- LLM transport (OpenAI-compatible tool calling) ------------------------------
 
 
-def chat_tools(messages: list[dict], tools: list | None = None) -> dict:
+def chat_tools(messages: list[dict], tools: list | None = None,
+               temperature: float = 0.0) -> dict:
     """Chat completion returning the assistant MESSAGE DICT (content and/or
     tool_calls). Same transport contract as the old chat_code: Bearer auth,
-    temperature 0, retry with backoff on transient failures, no retry on
-    4xx (context overflow is not transient), llama-server
-    chat_template_kwargs only to local endpoints, OpenRouter provider pin
-    and reasoning flag when configured."""
+    greedy sampling (temperature 0 — the loop may pass a one-shot escape
+    temperature after a duplicate call), retry with backoff on transient
+    failures, no retry on 4xx (context overflow is not transient),
+    llama-server chat_template_kwargs only to local endpoints, OpenRouter
+    provider pin and reasoning flag when configured."""
     headers = {"Content-Type": "application/json"}
     api_key = os.environ.get("STATEMENTLEDGER_LLM_API_KEY") or os.environ.get(
         "OPENROUTER_API_KEY"
@@ -105,7 +107,7 @@ def chat_tools(messages: list[dict], tools: list | None = None) -> dict:
     body: dict = {
         "model": MODEL,
         "messages": messages,
-        "temperature": 0,
+        "temperature": temperature,
         "max_tokens": MAX_TOKENS,
     }
     if tools:
@@ -822,6 +824,14 @@ def duplicate_note(name: str, first_turn: int) -> str:
     )
 
 
+def refusal_note(name: str, occurrences: int) -> str:
+    return (
+        f"ERROR: this exact {name} call has already run {occurrences} times "
+        "with this exact result (see above). Refusing to run it again — "
+        "change the arguments or take a different action."
+    )
+
+
 def dispatch(name: str, arguments: str, ctx: Ctx) -> tuple[str, str]:
     """Execute one tool call; returns (result text, kind) where kind is
     look/code/run. Never raises — failures are ERROR: strings the model
@@ -913,7 +923,12 @@ def agent_loop(
     repair_streak = 0
     crash_streak = 0
     look_streak = 0
-    seen_calls: dict[str, int] = {}  # duplicates counted since last elision
+    # (call_key -> [first_turn, occurrences]) since the last elision: the
+    # 2nd identical call gets a NOTE, the 3rd+ is refused outright — a
+    # temperature-0 model otherwise replays the same call forever, and each
+    # replayed turn reinforces the pattern in-context.
+    seen_calls: dict[str, list[int]] = {}
+    escape_temperature = 0.0
 
     for turn in range(1, turns + 1):
         saved = elide_middle(messages, threshold=compact_chars)
@@ -921,7 +936,7 @@ def agent_loop(
             trace.log(f"turn {turn} context elided", f"{saved} chars saved")
             seen_calls.clear()  # post-elision repeats re-fetch lost output
         try:
-            raw = chat(messages, TOOLS)
+            raw = chat(messages, TOOLS, temperature=escape_temperature)
         except RuntimeError as error:
             chat_fails += 1
             trace.log(f"turn {turn} chat failed", str(error))
@@ -945,34 +960,47 @@ def agent_loop(
 
         kinds: list[str] = []
         last_tool: dict | None = None
+        duplicated = False
         for call in calls:
             function = call.get("function", {})
             tool_name = function.get("name", "")
             arguments = function.get("arguments", "{}")
-            note = None
             key = call_key(tool_name, arguments)
+            note = None
+            result = None
             if key is not None:
                 if key in seen_calls:
-                    note = duplicate_note(tool_name, seen_calls[key])
+                    seen_calls[key][1] += 1
+                    duplicated = True
+                    if seen_calls[key][1] >= 3:  # circuit breaker
+                        result = refusal_note(tool_name, seen_calls[key][1])
+                        kind = "look"
+                        trace.line(f"turn {turn}: REFUSED duplicate "
+                                   f"{tool_name} call (x{seen_calls[key][1]})")
+                    else:
+                        note = duplicate_note(tool_name, seen_calls[key][0])
                 else:
-                    seen_calls[key] = turn
-            result, kind = dispatch(tool_name, arguments, ctx)
+                    seen_calls[key] = [turn, 1]
+            if result is None:
+                result, kind = dispatch(tool_name, arguments, ctx)
             if note:
                 result += "\n\n" + note
                 trace.line(f"turn {turn}: duplicate {tool_name} call "
-                           f"(first at turn {seen_calls[key]})")
+                           f"(first at turn {seen_calls[key][0]})")
             kinds.append(kind)
             entry = {"role": "tool", "tool_call_id": call["id"], "content": result}
             messages.append(entry)
             last_tool = entry
             if kind == "run" and ctx.last_gate and ctx.last_gate.get("verified"):
-                if last_tool is entry:
-                    entry["content"] += f"\n\n{footer(ctx, turn, turns)}"
+                entry["content"] += f"\n\n{footer(ctx, turn, turns)}"
                 trace.line(f"turn {turn}: VERIFIED via run")
                 history.append({"turn": turn, "calls": [c.get("function", {}).get("name") for c in calls],
                                 "outcome": "VERIFIED"})
                 return {"key": ctx.last_gate.get("key"),
                         "code": (workdir / "parser.py").read_text()}, True, history
+        # one stochastic request after any duplicate — the escape hatch for
+        # deterministic (temperature 0) replay loops; back to greedy after.
+        escape_temperature = 0.4 if duplicated else 0.0
 
         ran = "run" in kinds
         gate_crashed = ran and ctx.last_gate_crashed
