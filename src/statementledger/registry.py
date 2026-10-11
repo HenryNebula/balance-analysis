@@ -56,34 +56,39 @@ def key_problem(key: str) -> str | None:
     return None
 
 
-def user_registry() -> Path | None:
-    """The overlay directory (None when STATEMENTLEDGER_USER_REGISTRY is
-    unset) — user-distilled parsers, shadowing the built-in registry."""
+def user_registry(overlay: Path | None = None) -> Path | None:
+    """The overlay directory — user-distilled parsers, shadowing the built-in
+    registry. Default: STATEMENTLEDGER_USER_REGISTRY from the environment;
+    `overlay` overrides it (the web layer pins each app's own data tree —
+    the env var is process-global and wrong when several app instances
+    coexist, e.g. in tests)."""
+    if overlay is not None:
+        return overlay
     path = os.environ.get("STATEMENTLEDGER_USER_REGISTRY", "").strip()
     return Path(path) if path else None
 
 
-def keys() -> list[str]:
+def keys(overlay: Path | None = None) -> list[str]:
     """All registered parser keys, sorted (built-in + user overlay)."""
     found = {path.stem for path in REGISTRY.glob("*.py")}
-    overlay = user_registry()
-    if overlay is not None:
-        found |= {path.stem for path in overlay.glob("*.py")}
+    overlay_dir = user_registry(overlay)
+    if overlay_dir is not None:
+        found |= {path.stem for path in overlay_dir.glob("*.py")}
     return sorted(found)
 
 
-def module_path(key: str) -> Path:
+def module_path(key: str, overlay: Path | None = None) -> Path:
     """Where a parser with this key lives — or should be SAVED: the overlay
     when one is configured (runtime-distilled parsers are user data), else
     the built-in registry (e.g. the distill harness run by hand from the
     repo root)."""
-    overlay = user_registry()
-    if overlay is not None:
-        return overlay / f"{key}.py"
+    overlay_dir = user_registry(overlay)
+    if overlay_dir is not None:
+        return overlay_dir / f"{key}.py"
     return REGISTRY / f"{key}.py"
 
 
-def load_module(key: str):
+def load_module(key: str, overlay: Path | None = None):
     """Import the parser module for a key (overlay shadows built-in) and
     check it declares KEY + parse()."""
     import importlib.util
@@ -91,7 +96,7 @@ def load_module(key: str):
     problem = key_problem(key)
     if problem:
         raise ValueError(problem)
-    path = module_path(key)
+    path = module_path(key, overlay)
     if not path.exists():
         path = REGISTRY / f"{key}.py"  # fall back to the built-in copy
     if not path.exists():

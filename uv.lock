@@ -678,6 +678,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "pdfplumber" },
+    { name = "pikepdf" },
 ]
 
 [package.dev-dependencies]
@@ -700,7 +701,10 @@ web = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pdfplumber", specifier = ">=0.11" }]
+requires-dist = [
+    { name = "pdfplumber", specifier = ">=0.11" },
+    { name = "pikepdf", specifier = ">=8" },
+]
 
 [package.metadata.requires-dev]
 dev = [

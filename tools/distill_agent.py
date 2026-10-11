@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -31,7 +32,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
@@ -42,6 +43,8 @@ load_env()
 
 import statementledger as pl
 from statementledger.frames import frames_for
+from statementledger.looks import look_event
+from statementledger.pdfhealth import ScannedPdfError
 from statementledger.registry import REGISTRY, key_problem, module_path
 
 # The engine this process validated, pinned into every sandboxed child: the
@@ -302,10 +305,12 @@ print("GATE:" + json.dumps(verdict))
 '''
 
 
-def py_gate(workdir: Path, trace: Trace, pins: dict[str, int] | None = None) -> dict:
+def py_gate(workdir: Path, trace: Trace, pins: dict[str, int] | None = None,
+            turn: int = 0) -> dict:
     """The engine gate: import workdir/parser.py in a fresh sandbox and run
     parse() on EVERY statement. Verdict shape matches evaluate(); the extra
-    'gate_crashed' key says the child itself died (syntax error, timeout)."""
+    'gate_crashed' key says the child itself died (syntax error, timeout).
+    `turn` labels the gate event (0 = the pre-loop baseline/canned zone)."""
     (workdir / "gate_parser.py").write_text(
         GATE_RUNNER.format(expect_ledgers=repr(pins),
                            validated_src=VALIDATED_SRC))
@@ -332,6 +337,10 @@ def py_gate(workdir: Path, trace: Trace, pins: dict[str, int] | None = None) -> 
         "parser.py statementledger gate",
         f"exit {outcome['returncode']}\n{json.dumps(verdict, default=str)}",
     )
+    event = {"turn": turn, "verdict": verdict}
+    if turn == 0:
+        event["baseline"] = True  # the pre-loop staged parser, not a loop edit
+    trace.emit("gate", **event)
     return verdict
 
 
@@ -416,15 +425,30 @@ def lint_code(code: str) -> str | None:
     return None
 
 
-# --- Trace ------------------------------------------------------------------------
+# --- Trace + event emission --------------------------------------------------------
+
+
+def _utc_ts() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(
+        timespec="seconds")
 
 
 class Trace:
-    """Append-only run log next to the scripts and frames it describes."""
+    """Append-only run logs next to the scripts and frames they describe.
+
+    Two files, one truth: trace.log is the human-readable bracketed log;
+    events.jsonl is the SAME run as structured events (the vocabulary
+    web.agent_events documents — the web run manager tails this file
+    directly instead of parsing trace.log). emit() is called at exactly the
+    points where the legacy trace-derivation would produce an event, so
+    both paths yield the same trajectory."""
 
     def __init__(self, directory: Path):
         self.path = directory / "trace.log"
         self._file = self.path.open("a", encoding="utf-8")
+        self.events_path = directory / "events.jsonl"
+        self._events = self.events_path.open("a", encoding="utf-8")
+        self.terminal: dict | None = None  # the run's outcome, once
 
     def log(self, section: str, body: str = "") -> None:
         self._file.write(
@@ -437,8 +461,25 @@ class Trace:
         self._file.write(f"{text}\n")
         self._file.flush()
 
+    def emit(self, kind: str, **fields) -> None:
+        """One trajectory event, JSON per line, flushed (the web layer tails
+        this file live). `kind` is the event type; fields ride as-is."""
+        event = {"type": kind, "ts": _utc_ts(), **fields}
+        self._events.write(json.dumps(event) + "\n")
+        self._events.flush()
+
+    def emit_terminal(self, kind: str, **fields) -> None:
+        """The converged/failed outcome — exactly once (the first result
+        wins; a later one never overrides it, same rule as the trace
+        deriver's terminal state)."""
+        if self.terminal is not None:
+            return
+        self.terminal = {"type": kind, **fields}
+        self.emit(kind, **fields)
+
     def close(self) -> None:
         self._file.close()
+        self._events.close()
 
 
 # --- Loop policy (pure; unit-tested) ----------------------------------------------
@@ -651,6 +692,13 @@ class Ctx:
     last_gate_crashed: bool = False
     best: tuple[int, dict] | None = None
     probes: int = 0
+    current_turn: int = 0  # 0 = pre-loop baseline/canned zone
+    notes: dict[int, list[str]] = field(default_factory=dict)
+
+    def note(self, turn: int, text: str) -> None:
+        """A bare annotation that rides along with the turn's summary event
+        (same fold the legacy trace-derivation performs)."""
+        self.notes.setdefault(turn, []).append(text)
 
 
 def _lines_for(ctx: Ctx, args: dict) -> tuple[list[dict] | None, str | None]:
@@ -830,6 +878,7 @@ def _tool_write(ctx: Ctx, args: dict) -> str:
         return "ERROR: content over 24000 chars — parser.py should be under ~70 lines"
     (ctx.workdir / "parser.py").write_text(content)
     ctx.trace.log("write parser.py", content)
+    ctx.trace.emit("parser", turn=ctx.current_turn, content=content)
     parts = [f"wrote parser.py ({len(content.splitlines())} lines)"]
     pin = _key_check(content, ctx)
     if pin:
@@ -861,6 +910,7 @@ def _tool_edit(ctx: Ctx, args: dict) -> str:
     code = code.replace(old, new, 1)
     path.write_text(code)
     ctx.trace.log("edit parser.py", f"- {old!r}\n+ {new!r}")
+    ctx.trace.emit("parser", turn=ctx.current_turn, content=code)
     parts = [f"replaced 1 occurrence"]
     pin = _key_check(code, ctx)
     if pin:
@@ -883,7 +933,7 @@ def _tool_run(ctx: Ctx) -> tuple[str, str]:
     if violation:
         return f"ERROR: lint refuses parser.py — {violation}", "run"
     note = _clear_shadow(ctx)
-    verdict = py_gate(ctx.workdir, ctx.trace, ctx.pins)
+    verdict = py_gate(ctx.workdir, ctx.trace, ctx.pins, turn=ctx.current_turn)
     crashed = bool(verdict.pop("gate_crashed", False))
     ctx.last_gate = verdict
     ctx.last_gate_crashed = crashed
@@ -973,7 +1023,8 @@ def refusal_note(name: str, occurrences: int) -> str:
 def dispatch(name: str, arguments: str, ctx: Ctx) -> tuple[str, str]:
     """Execute one tool call; returns (result text, kind) where kind is
     look/code/run. Never raises — failures are ERROR: strings the model
-    reads. The result is logged to the trace beside its call."""
+    reads. The result is logged to the trace beside its call and emitted as
+    a tool event (plus a look event when the call pointed at statement 0)."""
     try:
         args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments or {})
         if not isinstance(args, dict):
@@ -1001,6 +1052,15 @@ def dispatch(name: str, arguments: str, ctx: Ctx) -> tuple[str, str]:
     else:
         return f"ERROR: unknown tool {name!r} (schemas are attached)", "look"
     ctx.trace.log(f"tool result: {name}", result[:2000])
+    turn = ctx.current_turn
+    ctx.trace.emit("tool", turn=turn, name=name, args=args,
+                   result=result[:4000])
+    if args.get("stmt", 0) == 0 and ctx.statements:
+        look = look_event(turn, name, args, result,
+                          ctx.statements[0]["lines"])
+        if look:
+            del look["type"]  # emit() adds it back
+            ctx.trace.emit("look", **look)
     return result, kind
 
 
@@ -1026,11 +1086,19 @@ def agent_loop(
     """Returns ({key, code} or None, verified?, turn history). frames=None
     extracts from pdfs; tests inject fixture frames instead. canned_script
     stages a parser and gates it once with no model."""
-    frames = frames or frames_for(pdfs, workdir)
+    if frames is None:
+        try:
+            frames = frames_for(pdfs, workdir)
+        except ScannedPdfError as error:
+            trace.log("result", f"FAILED ({error})")
+            trace.emit_terminal("failed", reason=str(error)[:200])
+            return None, False, [{"outcome": str(error)[:400]}]
     statements = frames["statements"]
     first = statements[0]
     trace.log("frames", f"{len(statements)} statement(s); {first['name']}: "
               f"{len(first['lines'])} lines")
+    trace.emit("frames", statements=len(statements), name=first["name"],
+               lines=len(first["lines"]))
     ctx = Ctx(workdir=workdir, statements=statements, trace=trace,
               require_key=require_key, pins=pins)
 
@@ -1070,9 +1138,11 @@ def agent_loop(
     refusal_streak = 0
 
     for turn in range(1, turns + 1):
+        ctx.current_turn = turn  # sections during this turn label with it
         saved = elide_middle(messages, threshold=compact_chars)
         if saved > 0:
             trace.log(f"turn {turn} context elided", f"{saved} chars saved")
+            trace.emit("elided", turn=turn, chars=saved, forced=False)
             seen_calls.clear()  # post-elision repeats re-fetch lost output
         request_chars = message_chars(messages)  # what this turn's call costs
         escape_temperature = 0.4 if escape_requests > 0 else 0.0
@@ -1086,10 +1156,12 @@ def agent_loop(
                 if saved > 0:
                     trace.log(f"turn {turn} context overflow — forced elision",
                               f"{saved} chars saved; retrying")
+                    trace.emit("elided", turn=turn, chars=saved, forced=True)
                     seen_calls.clear()  # elided turns may be needed again
                     continue
             chat_fails += 1
             trace.log(f"turn {turn} chat failed", str(error))
+            trace.emit("chat_failed", turn=turn, error=str(error)[:200])
             history.append({"turn": turn, "outcome": f"chat failed: {str(error)[:120]}"})
             if chat_fails >= CHAT_FAIL_STREAK:
                 break
@@ -1130,6 +1202,8 @@ def agent_loop(
                         refused = True
                         trace.line(f"turn {turn}: REFUSED duplicate "
                                    f"{tool_name} call (x{seen_calls[key][1]})")
+                        ctx.note(turn, f"REFUSED duplicate {tool_name} call "
+                                       f"(x{seen_calls[key][1]})")
                     else:
                         note = duplicate_note(tool_name, seen_calls[key][0])
                 else:
@@ -1140,6 +1214,8 @@ def agent_loop(
                 result += "\n\n" + note
                 trace.line(f"turn {turn}: duplicate {tool_name} call "
                            f"(first at turn {seen_calls[key][0]})")
+                ctx.note(turn, f"duplicate {tool_name} call "
+                               f"(first at turn {seen_calls[key][0]})")
             kinds.append(kind)
             entry = {"role": "tool", "tool_call_id": call["id"], "content": result}
             messages.append(entry)
@@ -1149,6 +1225,9 @@ def agent_loop(
                 trace.line(f"turn {turn}: VERIFIED via run")
                 history.append({"turn": turn, "calls": [c.get("function", {}).get("name") for c in calls],
                                 "outcome": "VERIFIED"})
+                trace.emit("turn", turn=turn, summary="VERIFIED",
+                           notes=ctx.notes.pop(turn, [])
+                           + ["VERIFIED via run"])
                 return {"key": ctx.last_gate.get("key"),
                         "code": (workdir / "parser.py").read_text()}, True, history
         # one stochastic request after any duplicate — the escape hatch for
@@ -1164,12 +1243,18 @@ def agent_loop(
                                 "calls": [c.get("function", {}).get("name") for c in calls],
                                 "outcome": f"loop abort after {refusal_streak} "
                                            "refused turns"})
+                trace.emit("turn", turn=turn, summary="loop abort",
+                           notes=ctx.notes.pop(turn, [])
+                           + [f"loop abort — {refusal_streak} "
+                              "consecutive turns of refused duplicate calls"])
                 break
             if refusal_streak == LOOP_REDIRECT_AT:
                 messages.append({"role": "user", "content": LOOP_MESSAGE})
                 escape_requests = 3
                 trace.line(f"turn {turn}: loop breaker — redirect message "
                            "sent, 3 sampled requests armed")
+                ctx.note(turn, "loop breaker — redirect message sent, "
+                               "3 sampled requests armed")
         else:
             refusal_streak = 0
 
@@ -1197,6 +1282,9 @@ def agent_loop(
         history.append({"turn": turn,
                         "calls": [c.get("function", {}).get("name") for c in calls],
                         "outcome": summary})
+        trace.emit("turn", turn=turn, summary=summary,
+                   chars_k=request_chars // 1000,
+                   notes=ctx.notes.pop(turn, []))
 
     return (ctx.best[1] if ctx.best else None), False, history
 
@@ -1238,6 +1326,8 @@ def main() -> int:
     print(f"distill agent: {len(args.pdfs)} statement(s), {mode}, {args.turns} turns")
     print(f"workdir: {workdir}")
     trace.log("run start", f"mode={mode}\npdfs={[str(p) for p in args.pdfs]}")
+    trace.emit("run_started",
+               model="canned script" if args.script else MODEL)
 
     system = AGENT_SYSTEM_PROMPT
     task_message = None
@@ -1255,13 +1345,21 @@ def main() -> int:
             return 1
         baseline = source_path.read_text()
         (workdir / "parser.py").write_text(baseline)
-        frames = frames_for(args.pdfs, workdir)
+        try:
+            frames = frames_for(args.pdfs, workdir)
+        except ScannedPdfError as error:
+            print(f"error: {error}")
+            trace.log("result", f"FAILED ({error})")
+            trace.emit_terminal("failed", reason=str(error)[:200])
+            trace.close()
+            return 1
         verdict = py_gate(workdir, trace)
         verdict.pop("gate_crashed", None)
         print("baseline: " + ("VERIFIED" if verdict["verified"] else
                               f"{verdict['clean']}/{len(args.pdfs)} statements reconcile"))
         if verdict["verified"]:
             trace.log("result", "baseline already verifies every statement")
+            trace.emit_terminal("converged", key=None, saved=False)
             print(f"{args.key} already verifies all {len(args.pdfs)} "
                   "statement(s) — nothing to maintain.")
             trace.close()
@@ -1291,7 +1389,9 @@ def main() -> int:
         crash_streak_limit=args.crash_streak, compact_chars=args.compact_chars,
     )
     if artifact is None or not verified:
-        trace.log("result", f"FAILED ({'no artifact' if artifact is None else 'not verified'})")
+        reason = (f"FAILED ({'no artifact' if artifact is None else 'not verified'})")
+        trace.log("result", reason)
+        trace.emit_terminal("failed", reason=reason[:200])
         trace.log("turn history", json.dumps(history, indent=2))
         trace.close()
         print("\nFAILED: no verified parser.")
@@ -1315,6 +1415,7 @@ def main() -> int:
     if args.no_save:
         print(f"\nVERIFIED (not saved, --no-save); parser drafted in {workdir}")
         trace.log("result", f"VERIFIED (not saved); parser drafted in {workdir}")
+        trace.emit_terminal("converged", key=artifact["key"], saved=False)
         import importlib.util
 
         draft = workdir / "parser.py"
@@ -1343,6 +1444,7 @@ def main() -> int:
     print("Reuse with zero LLM:")
     print(f"  uv run statementledger statement.pdf --key {key}")
     trace.log("result", f"VERIFIED parser saved: {out_path}")
+    trace.emit_terminal("converged", key=out_path.stem, saved=True)
 
     for pdf in args.pdfs:
         for ledger in pl.parse_all(str(pdf), key=key):

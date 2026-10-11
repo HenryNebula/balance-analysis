@@ -665,8 +665,14 @@ carry live selection events (§9.2), which is exactly the "super cool"
 part. Also usable read-only: point the UI at a run started manually in a
 terminal ("attach to existing run" — pass the `logs/distill_*` path).
 
-Decision: **design for (a), ship (b) as the attach-mode/fallback.** The
-patch is small, opt-in, and keeps the harness a plain CLI tool.
+Decision: **(a) is shipped (2026-10-10), always-on rather than
+flag-gated**: the agent's `Trace` writes `events.jsonl` beside `trace.log`
+at the same call sites (`tools/distill_agent.py` Trace.emit), and the run
+manager tails it verbatim. **(b) remains as the attach-mode/legacy
+fallback** — a workdir with only a `trace.log` (pre-emission agent) is
+derived through `web/agent_events.py:TraceDeriver`, same event vocabulary.
+The harness stays a plain CLI tool; the emitted file is just another
+artifact in its workdir.
 
 **Lifecycle**: one active run at a time (409 otherwise — bound the LLM
 spend); `DELETE /runs/{id}` sends SIGTERM to the process group, then

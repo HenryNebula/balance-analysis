@@ -174,7 +174,8 @@ export interface TurnDetail {
   tools: ToolCall[]
 }
 
-// -- agent trajectory events (SSE), derived from trace.log ---------------------
+// -- agent trajectory events (SSE): emitted by the distill agent's
+// events.jsonl (legacy runs: derived from trace.log) ---------------------------
 
 export interface RunEvent {
   type: string

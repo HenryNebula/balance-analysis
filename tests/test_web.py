@@ -134,10 +134,17 @@ def test_upload_too_large(tmp_path):
 def test_upload_scanned_pdf_gets_plain_note(client):
     from io import BytesIO
 
+    import PIL.Image
+    import reportlab.lib.utils as rlutils
     from reportlab.pdfgen import canvas
 
     buffer = BytesIO()
-    canvas.Canvas(buffer).save()  # valid one-page PDF, zero text
+    png = BytesIO()
+    PIL.Image.new("RGB", (60, 80), "lightgrey").save(png, format="PNG")
+    page = canvas.Canvas(buffer)  # one page, one full-page image, zero text
+    page.drawImage(rlutils.ImageReader(png), 0, 0, 600, 800)
+    page.showPage()
+    page.save()
     create(client, "Blue Lantern Savings")
     response = client.post(
         "/accounts/blue-lantern-savings/statements",
@@ -147,7 +154,8 @@ def test_upload_scanned_pdf_gets_plain_note(client):
     body = response.json()
     assert body["status"] == "failed"
     assert body["attempts"] == []
-    assert "scanned" in body["note"]
+    assert "scanned" in body["note"].lower()
+    assert "OCR" in body["note"]  # the actionable next step
 
 
 def test_upload_encrypted_pdf_gets_plain_note(client, tmp_path):
@@ -489,6 +497,7 @@ def _launch(client, slug, ids, mode="draft", **extra):
     return client.post("/runs", json=payload, headers=JSON)
 
 
+@pytest.mark.spawn
 def test_run_converges_and_auto_parses(run_client):
     create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
     sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
@@ -526,24 +535,32 @@ def test_run_converges_and_auto_parses(run_client):
     assert detail["summary"] is None or detail["notes"]
 
 
-def test_run_saved_to_overlay_not_package(run_client):
+@pytest.mark.spawn
+def test_run_saved_to_overlay_not_package(run_client, tmp_path):
     """Runtime-distilled parsers are USER DATA: the canned run must save
-    into the app's registry overlay, never into the package source."""
+    into THIS app's registry overlay (its own data tree — pinned into the
+    spawned agent), never into the package source."""
     create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
     sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
     run_id = _launch(run_client, "blue-lantern-savings", [sid]).json()["run_id"]
     run = _wait_terminal(run_client, run_id)
     assert run["status"] == "converged"
     from statementledger import registry
-    overlay = registry.user_registry()
+    overlay = registry.user_registry(tmp_path / "data" / "registry")
     assert overlay is not None and (overlay / f"{BLUE_KEY}.py").exists()
+    # and NOT the repo's dev data tree (the pre-pin poisoning path)
+    assert not (REPO / "data" / "registry" / f"{BLUE_KEY}.py").exists()
 
 
+@pytest.mark.spawn
 def test_run_validation_and_lock(run_client, tmp_path, monkeypatch):
     create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
     sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
-    # a REAL run (no canned script) requires the LLM endpoint configured
+    # a REAL run (no canned script) requires the LLM endpoint configured.
+    # The env-loader must stay out of it: a dev .env carrying the endpoint
+    # would legitimately satisfy the check and flip the 400 to a 202.
     monkeypatch.delenv("STATEMENTLEDGER_LLM_URL", raising=False)
+    monkeypatch.setattr("web.app._llm_env_loaded", True)
     plain = TestClient(create_app(data_root=tmp_path / "data-plain"))
     create(plain, "Blue Lantern Savings", key=COPPER_KEY)
     sid_plain = upload(plain, "blue-lantern-savings", BLUE).json()["id"]
@@ -563,6 +580,7 @@ def test_run_validation_and_lock(run_client, tmp_path, monkeypatch):
     _wait_terminal(run_client, first.json()["run_id"])
 
 
+@pytest.mark.spawn
 def test_launch_maintain_defaults_to_pin(run_client):
     # pin the bank's own parser: maintain targets the pin with no explicit
     # key, the staged baseline already verifies, and the run converges with
@@ -584,6 +602,7 @@ def test_launch_maintain_defaults_to_pin(run_client):
     assert detail.json()["verdict"]["verified"]
 
 
+@pytest.mark.spawn
 def test_run_cancel(tmp_path):
     # a canned parser whose import sleeps inside the sandboxed gate: the run
     # stays alive long enough to be cancelled mid-gate
@@ -608,6 +627,7 @@ def test_run_cancel(tmp_path):
                    turns=1).status_code == 202
 
 
+@pytest.mark.spawn
 def test_attach_to_existing_run(run_client):
     result = subprocess.run(  # a real agent run, no trajectory flag
         [sys.executable, "tools/distill_agent.py", str(BLUE),
@@ -632,6 +652,7 @@ SPA_INDEX = (Path(__file__).resolve().parents[1] / "web" / "frontend"
 
 
 @pytest.mark.skipif(not SPA_INDEX.exists(), reason="SPA bundle not built")
+@pytest.mark.spawn
 def test_spa_shell_served(run_client):
     """Browsers get the SPA shell on page routes and unknown GETs (history
     fallback); API clients get JSON; legacy /app links redirect to /."""
@@ -726,6 +747,7 @@ def test_spa_json_branches(client):
     assert repin.json()["registry_key"] == COPPER_KEY
 
 
+@pytest.mark.spawn
 def test_spa_statement_and_run_json(run_client):
     create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
     sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
@@ -750,3 +772,56 @@ def test_spa_statement_and_run_json(run_client):
         headers=JSON).json()
     assert parsed["verified"] is True
     assert parsed["prov_pages"] == []
+
+
+def test_agent_events_tailed_verbatim_via_attach(run_client, tmp_path):
+    """Current agents emit events.jsonl themselves; the manager relays those
+    lines untouched (no derivation). Attach mode over a synthetic workdir
+    exercises the exact tail/pump/relay code path with zero subprocesses —
+    the agent-side format guarantee lives in
+    test_distill_agent.test_emitted_events_match_the_derived_trace."""
+    import shutil
+    import uuid
+
+    events = [
+        {"type": "run_started", "ts": "2026-10-10T22:00:00+00:00",
+         "model": "canned script"},
+        {"type": "frames", "ts": "2026-10-10T22:00:00+00:00",
+         "statements": 1, "name": "x.pdf", "lines": 40},
+        {"type": "tool", "ts": "2026-10-10T22:00:01+00:00", "turn": 1,
+         "name": "grep", "args": {"pattern": "stop"},
+         "result": '{"hits": [[3, "Transactions stop"]], "count": 1}'},
+        {"type": "look", "ts": "2026-10-10T22:00:01+00:00", "turn": 1,
+         "tool": "grep", "label": "grep stop", "page": 0,
+         "rect": [20, 88, 300, 101], "line_ids": [3]},
+        {"type": "gate", "ts": "2026-10-10T22:00:02+00:00", "turn": 0,
+         "baseline": True, "verdict": {"verified": True, "clean": 1}},
+        {"type": "converged", "ts": "2026-10-10T22:00:02+00:00",
+         "key": "us__x__checking__1", "saved": True},
+    ]
+    # the attach guard requires workdirs under the repo root; logs/ is the
+    # real agent workdir tree (gitignored) — nest there, clean up after
+    workdir = REPO / "logs" / f"synthetic_{uuid.uuid4().hex[:8]}"
+    workdir.mkdir(parents=True)
+    try:
+        with (workdir / "events.jsonl").open("w") as out:
+            for event in events:
+                out.write(json.dumps(event) + "\n")
+        create(run_client, "Blue Lantern Savings")
+        run_id = _launch(run_client, "blue-lantern-savings", [],
+                         workdir=str(workdir)).json()["run_id"]
+        run = _wait_terminal(run_client, run_id)
+        assert run["status"] == "converged"
+        assert run["converged_key"] == "us__x__checking__1"
+
+        stream = run_client.get(f"/runs/{run_id}/events").text
+        relayed = [json.loads(line[6:]) for line in stream.splitlines()
+                   if line.startswith("data: ")]
+        relayed = [event for event in relayed
+                   if "type" in event]  # drop the closing run_status frame
+        assert relayed == events  # verbatim: identity, not re-derivation
+        detail = run_client.get(f"/runs/{run_id}/turns/1").json()
+        assert detail["tools"][0]["name"] == "grep"  # turn detail consumes
+        # the same events: one feed, no separate log parsing
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)

@@ -598,3 +598,97 @@ def test_agent_loop_canned_script_gates_offline(tmp_path):
         canned_script=PARSER, frames=ctx_frames)
     trace.close()
     assert verified and artifact["key"] == "us__copperkettle__checking__1"
+
+
+# --- structured event emission (events.jsonl) -------------------------------------
+
+
+def _events_file(tmp_path: Path) -> list[dict]:
+    return [json.loads(line)
+            for line in (tmp_path / "events.jsonl").read_text().splitlines()
+            if line.strip()]
+
+
+def test_emitted_events_match_the_derived_trace(tmp_path):
+    """The agent emits its trajectory directly (events.jsonl); the web layer
+    still derives the same vocabulary from trace.log for legacy workdirs.
+    Both paths must agree — this is the drift guard."""
+    from web.agent_events import TraceDeriver
+
+    ctx_frames = copper_frames()
+    (tmp_path / "frames.json").write_text(json.dumps(ctx_frames))
+    script = [
+        call("grep", {"pattern": "stop"}, "c1"),
+        call("render", {"start": 0, "n": 20}, "c2"),
+        call("write", {"content": PARSER.read_text()}, "c3"),
+        call("run", {}, "c4"),                 # verifies -> terminal turn
+    ]
+    state = {"i": 0}
+
+    def fake_chat(messages, tools, temperature=0.0):
+        reply = script[state["i"]]
+        state["i"] += 1
+        return reply
+
+    trace = agent.Trace(tmp_path)
+    artifact, verified, _ = agent.agent_loop(
+        [Path("fixture.pdf")], tmp_path, 10, trace, frames=ctx_frames,
+        chat=fake_chat)
+    trace.close()
+    assert verified
+
+    deriver = TraceDeriver(ctx_frames["statements"][0]["lines"])
+    derived = deriver.feed((tmp_path / "trace.log").read_text())
+    derived += deriver.close()
+    emitted = _events_file(tmp_path)
+
+    def strip(event):
+        return {k: v for k, v in event.items() if k != "ts"}
+
+    assert [e["type"] for e in emitted] == [e["type"] for e in derived]
+    for live, legacy in zip(emitted, derived):
+        live, legacy = strip(live), strip(legacy)
+        if live["type"] == "tool":
+            # legacy args/results are capped by the trace.log write (2000
+            # chars) and its line-joined body drops one trailing newline;
+            # emission carries them whole — compare within those limits
+            assert live["name"] == legacy["name"]
+            assert live["turn"] == legacy["turn"]
+            capped = live["result"][:2000]
+            if capped.endswith("\n"):
+                capped = capped[:-1]
+            assert capped == legacy["result"]
+            assert legacy["args"] in ({}, live["args"])
+            continue
+        assert live == legacy, (live, legacy)
+
+
+def test_canned_run_emits_baseline_gate_event(tmp_path):
+    ctx_frames = copper_frames()
+    (tmp_path / "frames.json").write_text(json.dumps(ctx_frames))
+    trace = agent.Trace(tmp_path)
+    agent.agent_loop([Path("fixture.pdf")], tmp_path, 1, trace,
+                     canned_script=PARSER, frames=ctx_frames)
+    trace.close()
+    events = _events_file(tmp_path)
+    gate = next(e for e in events if e["type"] == "gate")
+    assert gate["turn"] == 0 and gate["baseline"] is True
+    assert gate["verdict"]["verified"]
+
+
+def test_scanned_pdf_fails_with_terminal_event(tmp_path, monkeypatch):
+    def boom(pdfs, workdir):
+        raise agent.ScannedPdfError("scan.pdf: the PDF has no text layer")
+
+    monkeypatch.setattr(agent, "frames_for", boom)
+    trace = agent.Trace(tmp_path)
+    artifact, verified, history = agent.agent_loop(
+        [Path("scan.pdf")], tmp_path, 5, trace)
+    trace.close()
+    assert artifact is None and not verified
+    assert "no text layer" in history[0]["outcome"]
+    events = _events_file(tmp_path)
+    assert events[-1]["type"] == "failed"
+    assert "no text layer" in events[-1]["reason"]
+    # the trace keeps the human-readable twin of the terminal event
+    assert "FAILED (scan.pdf" in (tmp_path / "trace.log").read_text()

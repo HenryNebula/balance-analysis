@@ -5,6 +5,7 @@ description = "Bank statement PDFs to verified ledgers: per-bank Python parsers 
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "pdfplumber>=0.11",
+    "pikepdf>=8",
 ]
 
 [build-system]
@@ -19,6 +20,9 @@ packages = ["src/statementledger"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+    "spawn: launches real distill-agent subprocesses (host processes, no LLM, canned gates only; slower and timing-sensitive, deselect in CI with -m 'not spawn')",
+]
 
 [dependency-groups]
 dev = [

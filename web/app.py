@@ -141,9 +141,12 @@ def create_app(data_root: Path | None = None,
     # Parsers distilled at runtime are USER DATA: the overlay lives in the
     # data tree (never the repo), shadows same-key built-ins, and the env
     # var reaches the harness subprocess so it saves there too.
-    os.environ.setdefault("STATEMENTLEDGER_USER_REGISTRY",
-                          str(store.root / "registry"))
-    (store.root / "registry").mkdir(parents=True, exist_ok=True)
+    registry_root = store.root / "registry"  # this app's overlay: pinned
+    # into spawned agents and every registry/parsing call below — the env
+    # var stays process-global (for the in-repo CLI) but is never the
+    # source of truth for which tree an app instance owns
+    registry_root.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("STATEMENTLEDGER_USER_REGISTRY", str(registry_root))
     max_bytes = int((max_mb or float(os.environ.get("STMTLEDGER_WEB_MAX_MB",
                                                     MAX_MB_DEFAULT)))
                     * 1024 * 1024)
@@ -245,7 +248,7 @@ def create_app(data_root: Path | None = None,
         if not name:
             return fail(400, "Display name is required.")
         key = registry_key.strip() or None
-        if key is not None and key not in sl.keys():
+        if key is not None and key not in sl.keys(registry_root):
             return fail(400, f"{key!r} is not a registered parser key.")
         try:
             account = store.create_account(name, key, "user-pinned")
@@ -284,7 +287,7 @@ def create_app(data_root: Path | None = None,
             return JSONResponse({"detail": message}, status_code=status)
 
         key = registry_key.strip() or None
-        if key is not None and key not in sl.keys():
+        if key is not None and key not in sl.keys(registry_root):
             return fail(400, f"{key!r} is not a registered parser key.")
         account["registry_key"] = key
         account["registry_key_source"] = "user-pinned" if key else None
@@ -297,9 +300,9 @@ def create_app(data_root: Path | None = None,
         """Parse a stored PDF with the account pin (or an override), persist
         the outcome, and build the fragment/JSON outcome dict."""
         candidates = ([key_override] if key_override
-                      else parsing.candidates_for(account))
+                      else parsing.candidates_for(account, registry_root))
         result = parsing.probe(store.original_pdf(account["slug"], sid),
-                               candidates)
+                               candidates, overlay=registry_root)
         if result["ok"]:
             meta = store.save_parsed(account["slug"], sid, result["stmt"],
                                      result["key"], sl.__version__)
@@ -372,7 +375,7 @@ def create_app(data_root: Path | None = None,
         account = require_account(slug)
         require_statement(slug, sid)
         key_override = key.strip() or None
-        if key_override and key_override not in sl.keys():
+        if key_override and key_override not in sl.keys(registry_root):
             raise HTTPException(400, f"{key_override!r} is not a registered "
                                      "parser key.")
         with store.account_lock(slug):
@@ -459,13 +462,15 @@ def create_app(data_root: Path | None = None,
             with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
                 tmp.write(content)
                 tmp.flush()
-                outcome = await run_in_threadpool(parsing.probe_all,
-                                                  Path(tmp.name))
+                outcome = await run_in_threadpool(
+                    parsing.probe_all, Path(tmp.name),
+                    overlay=registry_root)
         else:
             if not store.statement_exists(slug, sid):
                 raise HTTPException(404, f"no statement {sid!r} in {slug!r}")
             outcome = await run_in_threadpool(
-                parsing.probe_all, store.original_pdf(slug, sid))
+                parsing.probe_all, store.original_pdf(slug, sid),
+                overlay=registry_root)
         verified = outcome["verified_keys"]
         suggested = verified[0] if len(verified) == 1 else None
         return {"results": outcome["results"],
@@ -487,7 +492,8 @@ def create_app(data_root: Path | None = None,
             key = account["registry_key"]
             for meta in store.statements(slug):
                 sid = meta["id"]
-                result = parsing.probe(store.original_pdf(slug, sid), [key])
+                result = parsing.probe(store.original_pdf(slug, sid), [key],
+                                       overlay=registry_root)
                 if result["ok"]:
                     new_meta = store.save_parsed(slug, sid, result["stmt"],
                                                  key, sl.__version__)
@@ -541,7 +547,7 @@ def create_app(data_root: Path | None = None,
                  "accounts": sum(1 for a in accounts
                                  if a["registry_key"] == key),
                  "statements": parsed_counts[key]}
-                for key in sl.keys()]
+                for key in sl.keys(registry_root)]
 
     @app.get("/registry")
     def registry_page(request: Request):
@@ -613,9 +619,11 @@ def create_app(data_root: Path | None = None,
         if workdir:  # attach mode: resolve + sanity-check the workdir
             candidate = (repo_root / workdir).resolve()
             if not candidate.is_relative_to(repo_root) or not (
-                    candidate / "trace.log").exists():
+                    (candidate / "events.jsonl").exists()
+                    or (candidate / "trace.log").exists()):
                 raise HTTPException(400, f"{workdir!r} is not a harness "
-                                         "workdir (no trace.log)")
+                                         "workdir (no events.jsonl or "
+                                         "trace.log)")
             workdir = candidate
         elif runs.harness_script is None:  # a real LLM run needs the endpoint
             # (the manager knows about STMTLEDGER_WEB_HARNESS_SCRIPT too —
