@@ -497,7 +497,6 @@ def _launch(client, slug, ids, mode="draft", **extra):
     return client.post("/runs", json=payload, headers=JSON)
 
 
-@pytest.mark.spawn
 def test_run_converges_and_auto_parses(run_client):
     create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
     sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
@@ -535,7 +534,6 @@ def test_run_converges_and_auto_parses(run_client):
     assert detail["summary"] is None or detail["notes"]
 
 
-@pytest.mark.spawn
 def test_run_saved_to_overlay_not_package(run_client, tmp_path):
     """Runtime-distilled parsers are USER DATA: the canned run must save
     into THIS app's registry overlay (its own data tree — pinned into the
@@ -552,7 +550,6 @@ def test_run_saved_to_overlay_not_package(run_client, tmp_path):
     assert not (REPO / "data" / "registry" / f"{BLUE_KEY}.py").exists()
 
 
-@pytest.mark.spawn
 def test_run_validation_and_lock(run_client, tmp_path, monkeypatch):
     create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
     sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
@@ -580,7 +577,6 @@ def test_run_validation_and_lock(run_client, tmp_path, monkeypatch):
     _wait_terminal(run_client, first.json()["run_id"])
 
 
-@pytest.mark.spawn
 def test_launch_maintain_defaults_to_pin(run_client):
     # pin the bank's own parser: maintain targets the pin with no explicit
     # key, the staged baseline already verifies, and the run converges with
@@ -602,7 +598,6 @@ def test_launch_maintain_defaults_to_pin(run_client):
     assert detail.json()["verdict"]["verified"]
 
 
-@pytest.mark.spawn
 def test_run_cancel(tmp_path):
     # a canned parser whose import sleeps inside the sandboxed gate: the run
     # stays alive long enough to be cancelled mid-gate
@@ -627,7 +622,6 @@ def test_run_cancel(tmp_path):
                    turns=1).status_code == 202
 
 
-@pytest.mark.spawn
 def test_attach_to_existing_run(run_client):
     result = subprocess.run(  # a real agent run, no trajectory flag
         [sys.executable, "tools/distill_agent.py", str(BLUE),
@@ -652,7 +646,6 @@ SPA_INDEX = (Path(__file__).resolve().parents[1] / "web" / "frontend"
 
 
 @pytest.mark.skipif(not SPA_INDEX.exists(), reason="SPA bundle not built")
-@pytest.mark.spawn
 def test_spa_shell_served(run_client):
     """Browsers get the SPA shell on page routes and unknown GETs (history
     fallback); API clients get JSON; legacy /app links redirect to /."""
@@ -747,7 +740,6 @@ def test_spa_json_branches(client):
     assert repin.json()["registry_key"] == COPPER_KEY
 
 
-@pytest.mark.spawn
 def test_spa_statement_and_run_json(run_client):
     create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
     sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
