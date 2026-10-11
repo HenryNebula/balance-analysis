@@ -38,6 +38,7 @@ from statementledger.engine import (TOL, CANONICAL_FIELDS, VerificationError,
                                     reconcile_statement, regions, render,
                                     render_table, table, validate)
 from statementledger.frames import frames_for, load_frames
+from statementledger.pdfhealth import ScannedPdfError
 from statementledger.registry import keys, load_module
 
 __version__ = "0.1.0"
@@ -45,7 +46,7 @@ __version__ = "0.1.0"
 __all__ = [
     "parse", "parse_all", "keys",
     # frames
-    "frames_for", "load_frames",
+    "frames_for", "load_frames", "ScannedPdfError",
     # engine
     "parse_amount", "parse_date", "reconcile", "reconcile_statement",
     "validate", "evaluate", "hint_for", "line_text", "items",

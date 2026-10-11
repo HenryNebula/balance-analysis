@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from statementledger import parse
+from statementledger import ScannedPdfError, parse
 
 
 def main() -> int:
@@ -17,7 +17,11 @@ def main() -> int:
                      help="registered parser key (default: try every "
                           "registered parser; the first that verifies wins)")
     args = cli.parse_args()
-    stmt = parse(args.pdf, key=args.key)
+    try:
+        stmt = parse(args.pdf, key=args.key)
+    except ScannedPdfError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     print(json.dumps(stmt, indent=2))
     return 0
 

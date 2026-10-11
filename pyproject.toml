@@ -5,6 +5,7 @@ description = "Bank statement PDFs to verified ledgers: per-bank Python parsers 
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "pdfplumber>=0.11",
+    "pikepdf>=8",
 ]
 
 [build-system]

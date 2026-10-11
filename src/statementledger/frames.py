@@ -33,6 +33,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from statementledger.pdfhealth import ScannedPdfError, has_images, heal, \
+    healable_fonts
+
 # Same constants the rust engine used: 2pt/3pt word tolerances (pdfplumber's
 # extract_words parameters), 3pt line-alignment tolerance, one-average-char
 # gap for same-line item merging.
@@ -160,10 +163,12 @@ def _text_items(pdf: Path) -> list[dict]:
     return text_items
 
 
-def _statement(pdf: Path) -> dict:
+def _statement(pdf: Path, name: str | None = None) -> dict:
     """One PDF -> one statement dict: same (page, y1_bin) runs are a line,
     in page/y/x order. A line's "y" is its FIRST (leftmost) item's y1 — the
-    bin only decides grouping, the stored y stays real geometry."""
+    bin only decides grouping, the stored y stays real geometry. `name`
+    overrides pdf.name (a healed copy must keep the original's name: parsers
+    and gate pins key on it)."""
     lines = []
     curr_bin = None
     for item in _text_items(pdf):
@@ -173,12 +178,54 @@ def _statement(pdf: Path) -> dict:
             curr_bin = item["y1_bin"]
             lines.append({"page": item["page"], "y": item["y1"],
                           "items": [[item["text"], item["x1"], item["x2"]]]})
-    return {"name": pdf.name, "lines": lines}
+    return {"name": name or pdf.name, "lines": lines}
+
+
+def _readable_copy(pdf: Path, workdir: Path) -> Path:
+    """The PDF to extract from: a healed copy when the font triage finds
+    /Differences names the ToUnicode stream contradicts, else the original.
+    Healing only rewrites code->Unicode maps — geometry is untouched, so
+    overlays drawn against the ORIGINAL pages still align. Any triage or
+    heal failure degrades to the original bytes (extraction quality then
+    says so, as it always has)."""
+    try:
+        findings = healable_fonts(pdf)
+        if not findings:
+            return pdf
+        healed_dir = workdir / "healed"
+        healed_dir.mkdir(parents=True, exist_ok=True)
+        healed_pdf = healed_dir / pdf.name
+        heal(pdf, healed_pdf)
+    except Exception:  # noqa: BLE001 - triage must never block extraction
+        return pdf
+    return healed_pdf
 
 
 def frames_for(pdfs: list[Path], workdir: Path) -> dict:
     """Extract layout frames for the pdfs and write frames.json into workdir
-    (the distill sandbox and registered parsers read it from there)."""
-    frames = {"statements": [_statement(pdf) for pdf in pdfs]}
+    (the distill sandbox and registered parsers read it from there).
+
+    Per PDF: heal first when the font triage arms a heal (see
+    statementledger.pdfhealth), then extract. A PDF whose pages carry no
+    text at all but do carry images raises ScannedPdfError — pixels are not
+    a layout; the caller says "OCR it first" (see parsing layers upstream).
+    The frames dict carries "healed": [names] when any statement needed a
+    healed copy (provenance for humans; parsers read only "statements")."""
+    statements = []
+    healed: list[str] = []
+    for pdf in pdfs:
+        source = _readable_copy(pdf, workdir)
+        if source != pdf:
+            healed.append(pdf.name)
+        statement = _statement(source, name=pdf.name)
+        if not statement["lines"] and has_images(source):
+            raise ScannedPdfError(
+                f"{pdf.name}: the PDF has no text layer (a scanned image) — "
+                "run OCR on it (e.g. `ocrmypdf statement.pdf out.pdf`) and "
+                "use the OCR'd copy")
+        statements.append(statement)
+    frames = {"statements": statements}
+    if healed:
+        frames["healed"] = healed
     (workdir / "frames.json").write_text(json.dumps(frames))
     return frames

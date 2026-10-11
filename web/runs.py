@@ -2,22 +2,23 @@
 real background job.
 
 The manager spawns tools/distill_agent.py as a tracked subprocess. The
-agent has no trajectory flag — its append-only trace.log (in a workdir it
-prints as `workdir: ...` on stdout) IS the trajectory: a watcher thread
-per run tails that file through web.agent_events.TraceDeriver, appends the
-derived events to data/runs/<id>/events.jsonl, and the app relays them over
-SSE. run.json is the durable record — reload-safe. One active run at a
-time (bounded LLM spend). DELETE = SIGTERM to the process group, SIGKILL
-after a grace period; the manager writes the terminal `cancelled` event
-itself (the agent does not trap SIGTERM). A run whose pid is gone on
-restart is marked `orphaned` with its artifacts still browsable. On
-VERIFIED the pending statements are auto-parsed with the new key (the
-registry overlay needs no restart).
+agent EMITS its own trajectory: an append-only events.jsonl in the workdir
+it prints as `workdir: ...` on stdout. A watcher thread per run tails that
+file into data/runs/<id>/events.jsonl, and the app relays it over SSE.
+Workdirs from agents before structured emission (or with only a trace.log)
+fall back to web.agent_events.TraceDeriver — same event vocabulary, so the
+run view renders identically. run.json is the durable record — reload-safe.
+One active run at a time (bounded LLM spend). DELETE = SIGTERM to the
+process group, SIGKILL after a grace period; the manager writes the
+terminal `cancelled` event itself (the agent does not trap SIGTERM). A run
+whose pid is gone on restart is marked `orphaned` with its artifacts still
+browsable. On VERIFIED the pending statements are auto-parsed with the new
+key (the registry overlay needs no restart).
 
 Attach mode (§8.2 fallback b): instead of spawning, watch an existing
-agent workdir (any dir with a trace.log) — same derivation, replayed from
-byte zero; events already persisted are skipped, so a re-attach or a
-post-restart adopt never duplicates.
+agent workdir (any dir with an events.jsonl or a trace.log) — same tailing,
+replayed from byte zero; events already persisted are skipped, so a
+re-attach or a post-restart adopt never duplicates.
 """
 
 from __future__ import annotations
@@ -67,6 +68,8 @@ class RunManager:
         self.repo_root = repo_root
         self.harness_script = harness_script  # tests: canned script, no LLM
         self.runs_root = store.root / "runs"
+        self.registry_root = store.root / "registry"  # THIS app's overlay
+        # (spawned agents save here; auto-parse loads from here)
         self.runs_root.mkdir(parents=True, exist_ok=True)
         self._guard = threading.Lock()
         self._watchers: dict[str, threading.Thread] = {}
@@ -132,7 +135,7 @@ class RunManager:
             if not key:
                 raise RunError("maintain mode needs a key (the parser being "
                                "evolved)")
-            if key not in sl.keys():
+            if key not in sl.keys(self.registry_root):
                 raise RunError(f"{key!r} is not a registered parser key")
 
         with self._guard:
@@ -175,7 +178,12 @@ class RunManager:
         process = subprocess.Popen(  # noqa: S603 - fixed argv, our repo
             argv, cwd=self.repo_root, stdout=log, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, start_new_session=True,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"})  # 'workdir:' must
+            env={**os.environ, "PYTHONUNBUFFERED": "1",
+                 # pin the overlay to THIS app's data root — the inherited
+                 # env may point at another app instance's (or the dev
+                 # server's) registry, and a verified parser would save there
+                 "STATEMENTLEDGER_USER_REGISTRY":
+                     str(self.registry_root)})  # 'workdir:' must
         # reach the log NOW, not when the block buffer fills — the manager
         # resolves the trace tail from it while the run is live
         run["pid"] = process.pid
@@ -221,11 +229,17 @@ class RunManager:
             return None
 
     def _pump(self, run: dict, final: bool = False) -> None:
-        """Tail the workdir's trace.log through the deriver into
-        events.jsonl. A fresh tail (post-restart adopt, attach) replays the
-        whole trace and skips the events already persisted."""
+        """Fold new workdir output into events.jsonl. Current agents write
+        events.jsonl themselves — tail it verbatim. Legacy workdirs (and
+        anything with only a trace.log) go through the TraceDeriver. A
+        fresh tail (post-restart adopt, attach) replays everything and
+        skips the events already persisted."""
         workdir = run.get("workdir")
         if not workdir:
+            return
+        source = Path(workdir) / "events.jsonl"
+        if source.exists():
+            self._pump_agent_events(run, source, final)
             return
         trace = Path(workdir) / "trace.log"
         if not trace.exists():
@@ -256,6 +270,41 @@ class RunManager:
         events += tail["deriver"].peek_terminal()
         if final:
             events += tail["deriver"].close()
+        if tail["skip"]:
+            events = events[tail["skip"]:]
+            tail["skip"] = 0
+        self._append_events(run_id, events)
+
+    def _pump_agent_events(self, run: dict, source: Path,
+                           final: bool) -> None:
+        """Tail the agent-emitted events.jsonl into the run's events.jsonl,
+        line-for-line. Only complete lines advance the offset — the agent
+        flushes per line, so a torn tail waits for its bytes."""
+        run_id = run["id"]
+        workdir = str(source.parent)
+        tail = self._tails.get(run_id)
+        if tail is not None and tail.get("workdir") != workdir:
+            tail = None  # same guard as the deriver path: another run's tail
+            self._tails.pop(run_id, None)
+        if tail is None or tail.get("mode") != "events":
+            tail = {"mode": "events", "workdir": workdir, "offset": 0,
+                    "skip": len(self.read_events(run_id))}
+            self._tails[run_id] = tail
+        data = source.read_bytes()[tail["offset"]:]
+        if not data and not final:
+            return
+        complete = data[: data.rfind(b"\n") + 1] if b"\n" in data else b""
+        if not complete:
+            return
+        tail["offset"] += len(complete)
+        events = []
+        for line in complete.splitlines():
+            if not line.strip():
+                continue
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                continue  # defensive: the agent writes valid JSON per line
         if tail["skip"]:
             events = events[tail["skip"]:]
             tail["skip"] = 0
@@ -431,10 +480,12 @@ class RunManager:
 
     def _synthesize_terminal(self, run_id: str, run: dict,
                              exit_code: int | None) -> None:
-        """The process died without a derived terminal event (torn trace,
-        crash): exit code 0 still means VERIFIED, anything else failed."""
+        """The process died without a terminal event (torn trace, crash):
+        exit code 0 still means VERIFIED, anything else failed."""
         tail = self._tails.get(run_id)
-        key = (tail["deriver"].key_hint() if tail else None) or run.get("key")
+        key = (tail["deriver"].key_hint()
+               if tail and tail.get("mode") != "events" else None) \
+            or run.get("key")
         if exit_code == 0:
             self._append_events(run_id, [{"type": "converged",
                                           "key": key, "saved": True}])
@@ -460,7 +511,8 @@ class RunManager:
             # auto-parse whenever the converged key is loadable from the
             # registry overlay (an unsaved draft cannot be)
             if (terminal == "converged"
-                    and run.get("converged_key") in sl.keys()):
+                    and run.get("converged_key")
+                    in sl.keys(self.registry_root)):
                 self._auto_parse(run)
         return terminal if run.get("status") in TERMINAL_STATES else ""
 
@@ -496,7 +548,7 @@ class RunManager:
         for sid in run["statement_ids"]:
             with self.store.account_lock(slug):
                 result = parsing.probe(self.store.original_pdf(slug, sid),
-                                       [key])
+                                       [key], overlay=self.registry_root)
                 if result["ok"]:
                     meta = self.store.save_parsed(slug, sid, result["stmt"],
                                                   key, sl.__version__)

@@ -32,10 +32,14 @@ def _error_text(error: BaseException) -> str:
 
 def _frames_or_note(pdf: Path) -> tuple[list[dict], str]:
     """Extract frames for one PDF; on failure return the plain-language
-    blocker instead of a pdfplumber traceback (§10)."""
+    blocker instead of a pdfplumber traceback (§10). Broken-glyph PDFs are
+    healed inside frames_for() — only the unrecoverable shapes reach here."""
     try:
         with tempfile.TemporaryDirectory() as tmp:
             frames = sl.frames_for([Path(pdf)], Path(tmp))
+    except sl.ScannedPdfError as error:
+        return [], (f"{error}. Statementledger reads printed text only — "
+                    "OCR the scan and upload the OCR'd copy.")
     except Exception as error:  # noqa: BLE001 - surfaced as data, not a 500
         text = _error_text(error)
         if any(marker in text for marker in ENCRYPTED_MARKERS):
@@ -45,18 +49,22 @@ def _frames_or_note(pdf: Path) -> tuple[list[dict], str]:
                     "If it is damaged, tools/heal_pdf.py may recover it.")
     statements = frames["statements"]
     if not statements or not statements[0].get("lines"):
-        return [], "No extractable text — is this a scanned image PDF?"
+        return [], ("No extractable text and no images either — the PDF "
+                    "looks empty or damaged.")
     return statements, ""
 
 
-def _evaluate_all(statements: list[dict], candidates: list[str]):
+def _evaluate_all(statements: list[dict], candidates: list[str],
+                   overlay: Path | None = None):
     """Every candidate's verdict over the (already extracted) frames:
-    per-key results and the list of verified keys."""
+    per-key results and the list of verified keys. `overlay` pins the user
+    registry (the env default is process-global; each app instance owns
+    its own)."""
     results: list[dict] = []
     verified: list[str] = []
     for key in candidates:
         try:
-            module = sl.load_module(key)
+            module = sl.load_module(key, overlay)
         except Exception as error:  # noqa: BLE001 - a broken registry module
             results.append({"key": key, "ok": False, "rows": 0,
                             "error": f"registry: {type(error).__name__}: "
@@ -73,7 +81,8 @@ def _evaluate_all(statements: list[dict], candidates: list[str]):
     return results, verified
 
 
-def probe(pdf: Path, candidates: list[str]) -> dict:
+def probe(pdf: Path, candidates: list[str],
+          overlay: Path | None = None) -> dict:
     """Try each candidate parser key against the PDF.
 
     Returns {ok, key, stmt, attempts, note, verified_keys}:
@@ -88,29 +97,31 @@ def probe(pdf: Path, candidates: list[str]) -> dict:
         return {"ok": False, "key": None, "stmt": None, "attempts": [],
                 "note": note, "verified_keys": []}
 
-    results, verified_keys = _evaluate_all(statements, candidates)
+    results, verified_keys = _evaluate_all(statements, candidates, overlay)
     attempts = [{"key": r["key"], "error": r["error"]}
                 for r in results if not r["ok"]]
     stmt = None
     if verified_keys:  # first-verified-wins, same rule as sl.parse
-        module = sl.load_module(verified_keys[0])
+        module = sl.load_module(verified_keys[0], overlay)
         stmt = module.parse(statements[0])
         stmt["_key"] = verified_keys[0]
     return {"ok": stmt is not None, "key": stmt and stmt["_key"], "stmt": stmt,
             "attempts": attempts, "note": "", "verified_keys": verified_keys}
 
 
-def probe_all(pdf: Path) -> dict:
+def probe_all(pdf: Path, overlay: Path | None = None) -> dict:
     """Dry-run try-all (§7.3): per-key {key, ok, rows, error} results and the
     verified keys, with nothing parsed-and-kept or persisted."""
     statements, note = _frames_or_note(pdf)
     if not statements:
         return {"results": [], "verified_keys": [], "note": note}
-    results, verified = _evaluate_all(statements, sl.keys())
+    results, verified = _evaluate_all(statements, sl.keys(overlay), overlay)
     return {"results": results, "verified_keys": verified, "note": ""}
 
 
-def candidates_for(account: dict) -> list[str]:
+def candidates_for(account: dict, overlay: Path | None = None) -> list[str]:
     """Pinned accounts parse with exactly their parser; unpinned accounts
     try every registered key (detection mode, §7.2)."""
-    return [account["registry_key"]] if account.get("registry_key") else sl.keys()
+    if account.get("registry_key"):
+        return [account["registry_key"]]
+    return sl.keys(overlay)

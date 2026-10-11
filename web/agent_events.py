@@ -1,11 +1,18 @@
 """Derive the web run-view trajectory from a distill agent's trace.log.
 
-tools/distill_agent.py is an OpenAI tool-calling loop whose only run
-artifact (besides the evolving parser.py) is an append-only trace.log of
-bracketed sections plus bare one-line notes. The web layer tails that file
-and folds new bytes into the SAME SSE event stream the run view consumes —
-so spawned runs, attached runs, and reloads of finished runs all replay
-through one derivation.
+This is the LEGACY path: workdirs from agents before structured emission
+(and any trace.log someone points the attach mode at). Current agents emit
+the same event vocabulary directly into events.jsonl beside their trace.log
+(tools/distill_agent.py Trace.emit); the web run manager prefers that file
+and falls back to this derivation — the vocabulary below is shared, so a
+run view renders identically either way.
+
+tools/distill_agent.py is an OpenAI tool-calling loop whose run artifacts
+(besides the evolving parser.py) are an append-only trace.log of bracketed
+sections plus bare one-line notes, and the events.jsonl it derives from
+them. This deriver tails trace.log and folds new bytes into the SAME SSE
+event stream the run view consumes — so attached legacy runs and reloads of
+finished runs all replay through one derivation.
 
 Vocabulary (events.jsonl; `turn` replaces the REPL's round — 0 is the
 baseline/canned zone before the loop starts):
@@ -42,8 +49,7 @@ import datetime
 import json
 import re
 
-SELECT_BAND = 11  # pt: highlight band around a frames line (y is the line's
-# baseline; pdfplumber y grows downward from the page top)
+from statementledger.looks import json_object, look_event
 
 RULE = "=" * 78
 DASH = "-" * 78
@@ -57,16 +63,6 @@ KEY_DECL = re.compile(r'^KEY\s*=\s*["\']([^"\']+)["\']', re.M)
 def _ts() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(
         timespec="seconds")
-
-
-def _json_object(text: str) -> dict:
-    """First line of `text` as a JSON object (tool args are single-line
-    dumps; anything else — including multi-line junk — is no args)."""
-    try:
-        value = json.loads(text.splitlines()[0]) if text.strip() else None
-    except (ValueError, IndexError):
-        return {}
-    return value if isinstance(value, dict) else {}
 
 
 class TraceDeriver:
@@ -182,7 +178,7 @@ class TraceDeriver:
                                "lines": int(found.group(3))})
         elif name.startswith("tool call: "):
             tool = name.removeprefix("tool call: ")
-            self._pending_call = (tool, _json_object(body))
+            self._pending_call = (tool, json_object(body))
             self._saw_tool = True
         elif name.startswith("tool result: "):
             tool = name.removeprefix("tool result: ")
@@ -239,7 +235,7 @@ class TraceDeriver:
         events.append({"type": "tool", "turn": turn, "name": tool,
                        "args": args, "result": body[:4000]})
         if args.get("stmt", 0) == 0 and self.lines:
-            look = _look_event(turn, tool, args, body, self.lines)
+            look = look_event(turn, tool, args, body, self.lines)
             if look:
                 events.append(look)
 
@@ -336,42 +332,3 @@ def _elided(section: str, body: str, forced: bool) -> dict:
     chars = re.search(r"(\d+) chars saved", body)
     return {"type": "elided", "turn": turn,
             "chars": int(chars.group(1)) if chars else 0, "forced": forced}
-
-
-def _look_event(turn: int, tool: str, args: dict, result: str,
-                lines: list[dict]) -> dict | None:
-    """render/grep/table arguments → the line span they examined, resolved
-    against frames into an overlay rect (pdfplumber points, y downward)."""
-    label = ""
-    ids: list[int] = []
-    if tool == "render":
-        start = max(0, int(args.get("start", 0) or 0))
-        n = max(1, min(int(args.get("n", 40) or 40), 120))
-        ids = list(range(start, min(len(lines), start + n)))
-        label = f"render {start}+{len(ids)}"
-    elif tool == "grep":
-        payload = _json_object(result)
-        hits = [hit[0] for hit in payload.get("hits", [])
-                if isinstance(hit, list) and isinstance(hit[0], int)]
-        ids = sorted(set(hits))
-        label = f"grep {str(args.get('pattern', ''))[:40]}"
-    elif tool == "table":
-        start, stop = args.get("start"), args.get("stop")
-        if isinstance(start, int) and isinstance(stop, int):
-            ids = list(range(start, min(len(lines), stop)))
-            label = f"table {start}..{stop}"
-    ids = [i for i in ids if 0 <= i < len(lines)]
-    if not ids:
-        return None
-    page = lines[ids[0]]["page"]
-    same_page = [i for i in ids if lines[i]["page"] == page]
-    if not same_page:
-        return None
-    items = [item for i in same_page for item in lines[i]["items"]]
-    x1 = min((item[1] for item in items), default=0)
-    x2 = max((item[2] for item in items), default=0)
-    top = min(lines[i]["y"] for i in same_page) - SELECT_BAND
-    bottom = max(lines[i]["y"] for i in same_page) + 2
-    return {"type": "look", "turn": turn, "tool": tool, "label": label,
-            "page": page, "rect": [x1, top, x2, bottom],
-            "line_ids": same_page}
