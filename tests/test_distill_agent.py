@@ -303,6 +303,29 @@ def test_lint_rejects_transcribed_cents_floats():
                            'def parse(f):\n    return {"x": 200.0 + 0.35}\n') is None
 
 
+def test_clear_shadow_moves_model_written_statementledger(tmp_path):
+    ctx = make_ctx(tmp_path)
+    assert agent._clear_shadow(ctx) is None  # nothing to do
+    (tmp_path / "statementledger.py").write_text("raise RuntimeError('x')\n")
+    note = agent._clear_shadow(ctx)
+    assert note and "shadowing the real library" in note
+    assert not (tmp_path / "statementledger.py").exists()
+    assert (tmp_path / "statementledger.py.shadowed").exists()
+    assert agent._clear_shadow(ctx) is None  # second pass: already gone
+
+
+def test_gate_bootstrap_beats_workdir_shadow(tmp_path):
+    """Even with a poisoning statementledger.py still sitting in the workdir,
+    the gate imports the engine the harness validated (sys.path.insert(0))
+    and returns a real verdict, not the shadow's traceback."""
+    ctx = make_ctx(tmp_path)
+    (tmp_path / "parser.py").write_text(PARSER.read_text())
+    (tmp_path / "statementledger.py").write_text("raise RuntimeError('shadow')\n")
+    verdict = agent.py_gate(tmp_path, ctx.trace)
+    assert verdict.get("verified"), verdict
+    assert verdict["key"] == "us__copperkettle__checking__1"
+
+
 def test_circuit_breaker_refuses_third_identical_call(tmp_path):
     ctx_frames = copper_frames()
     (tmp_path / "frames.json").write_text(json.dumps(ctx_frames))

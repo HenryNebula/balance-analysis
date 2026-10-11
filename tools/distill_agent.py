@@ -44,6 +44,12 @@ import statementledger as pl
 from statementledger.frames import frames_for
 from statementledger.registry import REGISTRY, key_problem, module_path
 
+# The engine this process validated, pinned into every sandboxed child: the
+# editable install can be re-pointed at a worktree by any concurrent uv sync,
+# and a model-written statementledger.py in the workdir shadows the package
+# (the script's directory leads sys.path). Both broke benchmark sweeps.
+VALIDATED_SRC = str(Path(pl.__file__).resolve().parent.parent)
+
 # LLM endpoint (STATEMENTLEDGER_LLM_* in .env / environment; see .env.example)
 BASE_URL = os.environ.get("STATEMENTLEDGER_LLM_URL", "").rstrip("/")
 MODEL = os.environ.get("STATEMENTLEDGER_LLM_MODEL", "")
@@ -280,9 +286,11 @@ def run_script(workdir: Path, name: str) -> dict:
 
 GATE_RUNNER = '''import importlib.util
 import json
+import sys
 from pathlib import Path
 
-import statementledger as pl
+sys.path.insert(0, {validated_src!r})  # the engine the harness validated —
+import statementledger as pl           # beats venv stomps AND workdir shadows
 
 spec = importlib.util.spec_from_file_location("candidate", Path("parser.py"))
 module = importlib.util.module_from_spec(spec)
@@ -299,7 +307,8 @@ def py_gate(workdir: Path, trace: Trace, pins: dict[str, int] | None = None) -> 
     parse() on EVERY statement. Verdict shape matches evaluate(); the extra
     'gate_crashed' key says the child itself died (syntax error, timeout)."""
     (workdir / "gate_parser.py").write_text(
-        GATE_RUNNER.format(expect_ledgers=repr(pins)))
+        GATE_RUNNER.format(expect_ledgers=repr(pins),
+                           validated_src=VALIDATED_SRC))
     outcome = run_script(workdir, "gate_parser")
     verdict = None
     if outcome["returncode"] == 0:
@@ -749,11 +758,37 @@ def _crash_hint(stderr: str) -> str | None:
     return None
 
 
+PROBE_BOOTSTRAP = '''import sys
+sys.path.insert(0, {validated_src!r})  # the engine the harness validated
+with open("probe_body.py") as _body:
+    exec(compile(_body.read(), "probe_body.py", "exec"),
+         {{"__name__": "__main__", "__file__": "probe_body.py"}})
+'''
+
+
+def _clear_shadow(ctx: Ctx) -> str | None:
+    """A model-written statementledger.py in the workdir shadows the real
+    package for every sandboxed child (the script's directory leads
+    sys.path) — move it aside before it poisons the gates."""
+    shadow = ctx.workdir / "statementledger.py"
+    if not shadow.exists():
+        return None
+    shadow.replace(ctx.workdir / "statementledger.py.shadowed")
+    ctx.trace.line("moved workdir statementledger.py shadow aside")
+    return ("NOTE: a statementledger.py you wrote in this workdir was "
+            "shadowing the real library for every sandboxed run (moved to "
+            "statementledger.py.shadowed) — import statementledger, never "
+            "recreate it")
+
+
 def _tool_python(ctx: Ctx, args: dict) -> str:
     ctx.probes += 1
-    (ctx.workdir / "probe.py").write_text(str(args.get("code", "")))
+    note = _clear_shadow(ctx)
+    (ctx.workdir / "probe_body.py").write_text(str(args.get("code", "")))
+    (ctx.workdir / "probe.py").write_text(
+        PROBE_BOOTSTRAP.format(validated_src=VALIDATED_SRC))
     outcome = run_script(ctx.workdir, "probe")
-    parts = []
+    parts = ([note] if note else [])
     if outcome["returncode"] != 0:
         parts.append(f"CRASHED:\n{outcome['stderr'][-1500:] or '(no stderr)'}")
         hint = _crash_hint(outcome["stderr"])
@@ -847,6 +882,7 @@ def _tool_run(ctx: Ctx) -> tuple[str, str]:
     violation = lint_code(code)
     if violation:
         return f"ERROR: lint refuses parser.py — {violation}", "run"
+    note = _clear_shadow(ctx)
     verdict = py_gate(ctx.workdir, ctx.trace, ctx.pins)
     crashed = bool(verdict.pop("gate_crashed", False))
     ctx.last_gate = verdict
@@ -862,12 +898,16 @@ def _tool_run(ctx: Ctx) -> tuple[str, str]:
     if len(payload) > 4000:
         payload = payload[:4000] + "\n(truncated)"
     if verdict.get("verified"):
-        return payload + "\nVERIFIED — reconciles every statement", "run"
-    note = ""
+        parts = [payload]
+        if note:
+            parts.append(note)
+        parts.append("VERIFIED — reconciles every statement")
+        return "\n".join(parts), "run"
+    suffix = ""
     if crashed:
         site = crash_site((ctx.workdir / "gate_parser.out").read_text())
-        note = f"\ngate crashed{f' in {site}' if site else ''} — the traceback is in the verdict errors"
-    return payload + note, "run"
+        suffix = f"\ngate crashed{f' in {site}' if site else ''} — the traceback is in the verdict errors"
+    return payload + (("\n" + note) if note else "") + suffix, "run"
 
 
 def _normalized_code(arguments: str) -> str | None:
