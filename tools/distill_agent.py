@@ -15,6 +15,9 @@ Usage (from the repo root):
     uv run python tools/distill_agent.py --key us__bank__prod__1 old.pdf new.pdf
         # MAINTAIN: parser.py starts from the registry source; old statements
         # are the regression set; KEY is pinned
+    uv run python tools/distill_agent.py --built-in --script my_parser.py stmt.pdf
+        # PROMOTE: save into src/statementledger/registry/ instead of the
+        # user overlay (git is the built-in changelog; no history.jsonl)
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import argparse
 import ast
 import contextlib
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -45,7 +49,8 @@ import statementledger as pl
 from statementledger.frames import frames_for
 from statementledger.looks import look_event
 from statementledger.pdfhealth import ScannedPdfError
-from statementledger.registry import REGISTRY, key_problem, module_path
+from statementledger.registry import (REGISTRY, key_problem, module_path,
+                                      parser_file, save_parser)
 
 # The engine this process validated, pinned into every sandboxed child: the
 # editable install can be re-pointed at a worktree by any concurrent uv sync,
@@ -1292,12 +1297,34 @@ def agent_loop(
 # --- CLI -----------------------------------------------------------------------------
 
 
+def _save_built_in(key: str, code: str) -> Path:
+    """Atomic save into the curated package registry — the one write path
+    into source, always an explicit --built-in decision; git is its
+    changelog (no history.jsonl for built-ins). Warn loudly when an overlay
+    copy shadows the key: promotion is a silent no-op until it is deleted."""
+    out_path = REGISTRY / f"{key}.py"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp.write_text(code)
+    os.replace(tmp, out_path)
+    shadow = parser_file(key)
+    if shadow is not None and shadow != out_path:
+        print(f"WARNING: {shadow} still shadows the built-in {out_path} — "
+              "delete the overlay copy or every load keeps using it")
+    return out_path
+
+
 def main() -> int:
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("pdfs", nargs="+", type=Path, help="statements from one bank")
     cli.add_argument("--turns", type=int, default=TURN_DEFAULT,
                      help="agent turns (default: %(default)s)")
     cli.add_argument("--no-save", action="store_true", help="never write the registry")
+    cli.add_argument("--built-in", action="store_true",
+                     help="save into src/statementledger/registry/ (curated "
+                          "source — git is its changelog) instead of the "
+                          "user overlay; no revision history is recorded. "
+                          "--no-save still wins when both are given")
     cli.add_argument("--key", default=None,
                      help="MAINTAIN the registered parser with this key — "
                           "parser.py starts from the registry source; the gate "
@@ -1337,11 +1364,11 @@ def main() -> int:
     if args.key:
         # maintain evolves the parser WHEREVER it lives: the user overlay
         # shadows the built-in (runtime-distilled parsers are user data)
-        source_path = module_path(args.key)
-        if not source_path.exists():
-            source_path = REGISTRY / f"{args.key}.py"
-        if not source_path.exists():
-            print(f"no registered parser {args.key!r} in {REGISTRY}")
+        problem = key_problem(args.key)
+        source_path = None if problem else parser_file(args.key)
+        if source_path is None:
+            print(f"no registered parser {args.key!r} "
+                  f"({problem or f'looked in the overlay and {REGISTRY}'})")
             return 1
         baseline = source_path.read_text()
         (workdir / "parser.py").write_text(baseline)
@@ -1409,8 +1436,11 @@ def main() -> int:
                 lineterm="", n=0)
             if line[:1] in "+-" and line[:3] not in ("+++", "---")
         ]
-        print(f"maintained in place: {len(diff)} lines changed "
-              "(git history is the parser's changelog)")
+        changelog = ("git history is the parser's changelog"
+                     if args.built_in else
+                     "the overlay's history.jsonl is the parser's changelog "
+                     "(tools/registry_history.py)")
+        print(f"maintained in place: {len(diff)} lines changed ({changelog})")
         trace.log("maintenance diff", "\n".join(diff[:80]))
     if args.no_save:
         print(f"\nVERIFIED (not saved, --no-save); parser drafted in {workdir}")
@@ -1436,11 +1466,21 @@ def main() -> int:
         trace.close()
         return 0
 
-    out_path = module_path(key)  # the overlay when one is configured (the
-    # web app points it at its data tree), else the package registry
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(artifact["code"])
-    print(f"\nVERIFIED parser saved: {out_path}")
+    # every statement the gate verified against, pinned into the history
+    # record (sha16 — the same id the web store gives an uploaded PDF)
+    verified_against = tuple(
+        hashlib.sha256(pdf.read_bytes()).hexdigest()[:16] for pdf in args.pdfs)
+    if args.built_in:
+        out_path = _save_built_in(key, artifact["code"])
+        print(f"\nVERIFIED parser saved (built-in): {out_path}")
+    else:
+        sha16 = save_parser(
+            key, artifact["code"],
+            source="maintain" if args.key else "distill",
+            verified_against=verified_against,
+            run_id=os.environ.get("STMTLEDGER_RUN_ID"))
+        out_path = module_path(key)  # where it just landed, for the prints
+        print(f"\nVERIFIED parser saved: {out_path} (revision {sha16})")
     print("Reuse with zero LLM:")
     print(f"  uv run statementledger statement.pdf --key {key}")
     trace.log("result", f"VERIFIED parser saved: {out_path}")

@@ -253,7 +253,7 @@ def test_delete_account(client, tmp_path):
     assert not (tmp_path / "data" / "accounts" / "blue-lantern-savings").exists()
 
 
-def test_registry(client):
+def test_registry(client, tmp_path):
     create(client, "Blue Lantern Savings")
     upload(client, "blue-lantern-savings", BLUE)
     data = client.get("/registry.json").json()
@@ -262,6 +262,14 @@ def test_registry(client):
     assert keys[BLUE_KEY]["statements"] == 1  # usage counts for the SPA
     import statementledger as sl
     assert set(keys) == set(sl.keys())  # every module, docstring or not
+    # revision provenance columns (§2.3): a built-in row carries the sha of
+    # the file a load would exec and its mtime, with no overlay history
+    from statementledger import registry
+    row = keys[BLUE_KEY]
+    overlay = tmp_path / "data" / "registry"
+    assert row["sha16"] == registry.current_sha(BLUE_KEY, overlay)
+    assert row["updated_at"]
+    assert row["revisions"] == 0
 
 
 def test_two_accounts_same_pdf_allowed(client):
@@ -497,7 +505,7 @@ def _launch(client, slug, ids, mode="draft", **extra):
     return client.post("/runs", json=payload, headers=JSON)
 
 
-def test_run_converges_and_auto_parses(run_client):
+def test_run_converges_and_auto_parses(run_client, tmp_path):
     create(run_client, "Blue Lantern Savings", key=COPPER_KEY)
     sid = upload(run_client, "blue-lantern-savings", BLUE).json()["id"]
     response = _launch(run_client, "blue-lantern-savings", [sid])
@@ -513,6 +521,14 @@ def test_run_converges_and_auto_parses(run_client):
         f"/accounts/blue-lantern-savings/statements/{sid}",
         headers=JSON).json()
     assert parsed["verified"] is True
+
+    # the auto-parse pinned the exact parser revision (provenance §2.3)
+    from statementledger import registry
+    meta = json.loads((tmp_path / "data" / "accounts" / "blue-lantern-savings"
+                       / "statements" / sid / "meta.json").read_text())
+    head = registry.parser_history(
+        BLUE_KEY, tmp_path / "data" / "registry")[-1]["sha16"]
+    assert meta["history"][-1]["parser_sha"] == head
 
     # the trajectory is complete and relays over SSE with a run_status close
     stream = run_client.get(f"/runs/{run_id}/events")
@@ -548,6 +564,15 @@ def test_run_saved_to_overlay_not_package(run_client, tmp_path):
     assert overlay is not None and (overlay / f"{BLUE_KEY}.py").exists()
     # and NOT the repo's dev data tree (the pre-pin poisoning path)
     assert not (REPO / "data" / "registry" / f"{BLUE_KEY}.py").exists()
+    # the save left exactly one revision record, tied to THIS run: the
+    # verified_against ids ARE the store's statement ids (pdf sha16s), and
+    # the parent is the built-in the canned script copied
+    history = registry.parser_history(BLUE_KEY, overlay)
+    assert len(history) == 1
+    assert history[0]["source"] == "distill"
+    assert history[0]["run_id"] == run_id
+    assert history[0]["verified_against"] == [sid]
+    assert history[0]["parent_builtin_sha"] is not None
 
 
 def test_run_validation_and_lock(run_client, tmp_path, monkeypatch):

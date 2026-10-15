@@ -133,9 +133,16 @@ data/                                   # gitignored (add "data/" to .gitignore)
 │       ├── run.json                    # argv, account, statement ids, pid, status
 │       └── events.jsonl                # trajectory events (§9.1), copied from the run
 ├── registry/                           # USER REGISTRY overlay: parsers distilled
-│   └── au__bank__product__1.py         # at runtime are USER DATA — saved here by
-│                                       # the harness, shadowing same-key built-ins;
-│                                       # never committed, never in package source
+│   ├── au__bank__product__1.py         # at runtime are USER DATA — saved here by
+│   │                                   # the harness (CLI distill runs land in the
+│   │                                   # same ~/.local/share tree by default),
+│   │                                   # shadowing same-key built-ins; never
+│   │                                   # committed, never in package source
+│   └── .history/                       # revision history (§2.3) — every overlay
+│       └── au__bank__product__1/       # save: an immutable blob + one record
+│           ├── objects/<sha16>.py      # the saved source, content-addressed
+│           └── history.jsonl           # append-only: at, sha16, source, note,
+│                                       # verified_against, run_id, parent_builtin_sha
 └── cache/
     └── pages/<sha-prefix>/page_0.png   # lazily rasterized PDF pages (§9.3)
 ```
@@ -186,6 +193,7 @@ referenced from `run.json`. `logs/` is already gitignored.
        {"key": "us__bluelantern__savings__1",  "error": ""}
      ]},
     {"at": "2026-10-02T09:15:10+00:00", "outcome": "parsed",
+     "parser_sha": "9b1deb4d3b7d4bec",   // sha16 of the exact revision that verified
      "key": "us__bluelantern__savings__1", "statementledger": "0.1.0"}
   ]
 }
@@ -198,10 +206,14 @@ Design points:
   *different* account is allowed (folders stay self-contained).
 - **Re-parses after a parser upgrade**: `statement.json` is overwritten in
   place (it is derived data); each pass appends one `history` entry with the
-  key and `statementledger.__version__`. A registry *version bump* is a new
-  key (`us__bank__product__2`), so upgrading an account = re-pin + re-parse
-  all (§7.4); same-key module edits (git pull) are covered by the same
-  "re-parse all" action.
+  key, the `parser_sha` of the exact revision that verified, and
+  `statementledger.__version__` — a stored ledger stays re-derivable against
+  the revision that produced it. A registry *version bump* is a new key
+  (`us__bank__product__2`), so upgrading an account = re-pin + re-parse all
+  (§7.4); same-key module edits are covered by the same "re-parse all"
+  action — overlay edits carry their own revision history
+  (`registry/.history/`, §2.1; `tools/registry_history.py` inspects or
+  reverts), built-in edits remain a git-pull concern.
 - **Period** is derived from transaction dates (min/max of non-null dates;
   rows may legitimately carry `date: null` — `validate()` allows it,
   `engine.py:317-321`). Used for overlap/chain checks (§10).
@@ -278,14 +290,24 @@ provenance convention of §9.5 possible without touching the engine.
 
 ### 3.4 Registry enumeration & structured verdicts (the probe building blocks)
 
-- `sl.keys() -> list[str]` — all registered keys, sorted
-  (`src/statementledger/registry.py:22-24`; globs live, every call).
-- `sl.load_module(key)` — imports `registry/<key>.py` fresh and checks the
-  `KEY` + `parse()` contract (`registry.py:27-42`). Imported into the
-  package at `__init__.py:39` (not in `__all__`, still `sl.load_module`).
-  **Execs the file every call — no import caching**, so a parser saved by
-  the distill harness becomes usable by a running web server with no
-  restart. Same for `keys()`.
+- `sl.keys() -> list[str]` — all registered keys, sorted (built-ins ∪ user
+  overlay; globs live, every call). The overlay resolves
+  `STATEMENTLEDGER_USER_REGISTRY` → `~/.local/share/statementledger/registry`
+  (XDG-aware); the web layer always passes its own `registry/` explicitly.
+- `sl.load_module(key, overlay=None)` — imports the overlay copy of
+  `<key>.py` when one exists, else the built-in, and checks the `KEY` +
+  `parse()` contract. Imported into the package at `__init__.py` (not in
+  `__all__`, still `sl.load_module`). **Execs the file every call — no
+  import caching**, so a parser saved by the distill harness becomes usable
+  by a running web server with no restart. Same for `keys()`.
+- Revision history (`statementledger/registry.py`, overlay only — git is
+  the built-in changelog): `save_parser(key, code, source, …)` writes the
+  immutable content-addressed blob, swaps the live copy atomically, appends
+  one `history.jsonl` record (§2.1) and returns the sha16;
+  `parser_history(key)`, `revision_code(key, sha16)` and
+  `revert_parser(key, sha16)` read back / restore a revision as the new
+  head; `parser_file(key)` / `current_sha(key)` say what a load would exec
+  and its sha (the provenance behind `parser_sha`, §2.3).
 - `sl.frames_for(pdfs: list[Path], workdir: Path) -> dict` — PDF → frames
   (`src/statementledger/frames.py:179-184`); returns
   `{"statements": [{"name", "lines": [{"page", "y", "items":
@@ -309,11 +331,14 @@ string: extract frames once with `frames_for`, then for each key from
 
 ### 3.5 CLI (for copy-paste instructions)
 
-`statementledger <pdf> [--key KEY]` (`src/statementledger/cli.py:12-22`).
-Distill harness: `tools/distill_harness.py <pdfs…> [--key K] [--rounds N]
-[--max-probes N] [--no-save]` (`tools/distill_harness.py:993-1025`), env
-`STATEMENTLEDGER_LLM_URL/MODEL/API_KEY/PROVIDER/REASONING/ROUNDS/TIMEOUT`
-(`distill_harness.py:55-57,380-390`, `.env.example`).
+`statementledger <pdf> [--key KEY]` (`src/statementledger/cli.py`).
+Distill harness: `tools/distill_agent.py <pdfs…> [--key K] [--turns N]
+[--no-save] [--built-in]`, env
+`STATEMENTLEDGER_LLM_URL/MODEL/API_KEY/PROVIDER/REASONING/TURNS/TIMEOUT`
+(`.env.example`); a verified run saves into the user overlay with a
+revision record (`--built-in`: into `src/statementledger/registry/`, git
+its changelog). Registry history: `tools/registry_history.py
+list|show|diff|revert`.
 
 ---
 
