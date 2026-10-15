@@ -55,6 +55,23 @@ product, keyed `cc__bank__product__n` (country, bank, product, version):
 `sl.parse(pdf)` without a key tries every registered parser and returns the
 first that verifies.
 
+Two layers, in precedence order: the **user overlay** —
+`STATEMENTLEDGER_USER_REGISTRY` when set, else
+`~/.local/share/statementledger/registry` (XDG-aware; with the default
+`STMTLEDGER_WEB_DATA`, that is also where the web app's overlay lives) —
+and the built-ins above. The overlay
+shadows same-key built-ins, and every overlay save goes through
+`save_parser()`, which keeps a revision history:
+
+    <overlay>/<key>.py                           live copy (what loads)
+    <overlay>/.history/<key>/objects/<sha16>.py  immutable revision blobs
+    <overlay>/.history/<key>/history.jsonl       one record per save
+
+Inspect and revert with `tools/registry_history.py` (`list` / `show` /
+`diff` / `revert`; refs are a sha16, `HEAD`, `HEAD~n` — and `LIVE` on
+diff, to see what changed since the last save). Built-ins carry no history
+tree; git is their changelog.
+
 ## Adding a bank: the distill agent
 
 You do not write parsers by hand (though you can — the registry modules are
@@ -70,6 +87,11 @@ $ uv run python tools/distill_agent.py newbank_statement.pdf
 $ uv run python tools/distill_agent.py --key us__newbank__checking__1 \
       january.pdf february.pdf   # MAINTAIN: evolve a registered parser
 ```
+
+A verified run saves into the user overlay with a revision record
+(`--no-save` drafts without writing anything). To promote a parser into the
+curated shipped set, `--built-in` writes `src/statementledger/registry/`
+instead — commit the result; git is the built-in changelog.
 
 Configuration via `STATEMENTLEDGER_LLM_*` (copy `.env.example` to `.env`);
 any OpenAI-compatible endpoint works, including a local llama-server.
@@ -99,8 +121,10 @@ runtime — accounts, statements, runs, **and parsers distilled through the
 UI** — lives under `STMTLEDGER_WEB_DATA` (default
 `~/.local/share/statementledger`). Distilled parsers go to a user-registry
 *overlay* (`data/registry/`, shadowing same-key built-ins) and are user
-data, never committed; the shipped `src/statementledger/registry/` stays
-curated. To seed the demo accounts into that store:
+data, never committed — CLI-initiated distills land in the same tree by
+default, each save revisioned under `data/registry/.history/`; the shipped
+`src/statementledger/registry/` stays curated. To seed the demo accounts
+into that store:
 
 ```console
 $ STMTLEDGER_WEB_DATA=~/.local/share/statementledger \
@@ -120,7 +144,7 @@ workdir can be attached (tail-watch, no live selections).
 
 ```console
 $ uv sync --group web
-$ uv run --group web pytest                         # 90 tests
+$ uv run --group web pytest                         # ~340 tests
 $ uv run python tools/fixtures/gen_fixtures.py      # regenerate fixtures
 $ uv build                                          # wheel: package + registry only
 ```

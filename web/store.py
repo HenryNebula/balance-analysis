@@ -168,9 +168,12 @@ class Store:
         return meta
 
     def save_parsed(self, slug: str, sid: str, stmt: dict, key: str,
-                    statementledger_version: str) -> dict:
+                    statementledger_version: str,
+                    parser_sha: str | None = None) -> dict:
         """Overwrite statement.json (derived data) and append one history
-        entry; re-parses never erase history (§2.3)."""
+        entry; re-parses never erase history (§2.3). `parser_sha` pins the
+        exact registry revision that produced this ledger (provenance:
+        a stored ledger stays re-derivable against it)."""
         directory = self._statement_dir(slug, sid)
         self._write_json(directory / "statement.json", stmt)
         meta = json.loads((directory / "meta.json").read_text())
@@ -182,6 +185,7 @@ class Store:
                            "closing_balance": stmt["closing_balance"]}
         meta["status"] = "parsed"
         meta["history"].append({"at": now(), "outcome": "parsed", "key": key,
+                                "parser_sha": parser_sha,
                                 "statementledger": statementledger_version})
         self._write_json(directory / "meta.json", meta)
         return meta

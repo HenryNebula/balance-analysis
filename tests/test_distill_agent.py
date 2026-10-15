@@ -692,3 +692,26 @@ def test_scanned_pdf_fails_with_terminal_event(tmp_path, monkeypatch):
     assert "no text layer" in events[-1]["reason"]
     # the trace keeps the human-readable twin of the terminal event
     assert "FAILED (scan.pdf" in (tmp_path / "trace.log").read_text()
+
+
+def test_save_built_in_is_atomic_and_shadow_aware(tmp_path, monkeypatch,
+                                                  capsys):
+    code = ('KEY = "us__testbank__checking__1"\n'
+            "def parse(frames):\n    return {}\n")
+    monkeypatch.setattr(agent, "REGISTRY", tmp_path / "registry")
+    out = agent._save_built_in("us__testbank__checking__1", code)
+    assert out == tmp_path / "registry" / "us__testbank__checking__1.py"
+    assert out.read_text() == code
+    assert not list((tmp_path / "registry").glob("*.tmp"))  # atomic: no scraps
+    assert capsys.readouterr().out == ""  # nothing shadows it yet
+
+    # an overlay copy shadows the new built-in — the save must say so,
+    # or the promotion is silently a no-op
+    from statementledger import registry
+
+    overlay = tmp_path / "overlay"
+    registry.save_parser("us__testbank__checking__1", code + "# evolved\n",
+                         overlay, source="maintain")
+    monkeypatch.setenv("STATEMENTLEDGER_USER_REGISTRY", str(overlay))
+    agent._save_built_in("us__testbank__checking__1", code)
+    assert "still shadows" in capsys.readouterr().out

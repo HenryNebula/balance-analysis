@@ -69,7 +69,13 @@ def _verified(pdf: str, key: str | None):
     candidates = [key] if key else keys()
     failures = []
     for candidate in candidates:
-        module = load_module(candidate)
+        try:
+            module = load_module(candidate)
+        except Exception as error:  # noqa: BLE001 - an unloadable overlay
+            # entry (bad key, broken module — user data can be junk) is a
+            # failed candidate, not a dead discovery loop (web/parsing._evaluate_all)
+            failures.append(f"{candidate}: {type(error).__name__}: {error}")
+            continue
         verdict = evaluate(module.parse, statements)
         if verdict["verified"]:
             return candidate, module.parse(statements[0])

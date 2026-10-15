@@ -33,6 +33,7 @@ from collections import Counter
 from pathlib import Path
 
 import statementledger as sl
+from statementledger import registry as sl_registry
 from fastapi import (FastAPI, File, Form, HTTPException, Request,
                      UploadFile)
 from fastapi.responses import (FileResponse, JSONResponse,
@@ -62,14 +63,26 @@ def _duration(started: str | None, ended: str | None) -> str:
     return f"{seconds // 60}m {seconds % 60:02d}s"
 
 
-def _description(key: str) -> str:
+def _description(key: str, overlay: Path) -> str:
     """First docstring line of a registry module, for humans (distilled
     modules often carry no docstring — that is fine, not a load failure)."""
     try:
-        lines = (sl.load_module(key).__doc__ or "").strip().splitlines()
+        lines = (sl.load_module(key, overlay).__doc__ or "").strip().splitlines()
         return (lines[0] if lines else "").rstrip(" —-")
     except Exception:  # noqa: BLE001 - a broken module still gets a row
         return "(module failed to load)"
+
+
+def _updated_at(key: str, overlay: Path) -> str:
+    """Last-write time of the parser file a load would exec, in the store
+    stamp format. Built-ins show their checkout mtime, which is fine."""
+    from datetime import datetime, timezone
+
+    path = sl_registry.parser_file(key, overlay)
+    if path is None:
+        return ""
+    stamp = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    return stamp.isoformat(timespec="seconds")
 
 
 def _prov_pages(ledger: dict | None, frames: dict | None) -> list[dict]:
@@ -305,7 +318,9 @@ def create_app(data_root: Path | None = None,
                                candidates, overlay=registry_root)
         if result["ok"]:
             meta = store.save_parsed(account["slug"], sid, result["stmt"],
-                                     result["key"], sl.__version__)
+                                     result["key"], sl.__version__,
+                                     parser_sha=sl_registry.current_sha(
+                                         result["key"], registry_root))
             outcome = {"kind": "parsed", "statement": meta,
                        "key": result["key"]}
             if not account.get("registry_key"):  # detection mode (§7.2)
@@ -496,7 +511,9 @@ def create_app(data_root: Path | None = None,
                                        overlay=registry_root)
                 if result["ok"]:
                     new_meta = store.save_parsed(slug, sid, result["stmt"],
-                                                 key, sl.__version__)
+                                                 key, sl.__version__,
+                                                 parser_sha=sl_registry.current_sha(
+                                                     key, registry_root))
                 else:
                     new_meta = store.save_failed(slug, sid,
                                                  result["attempts"],
@@ -543,10 +560,16 @@ def create_app(data_root: Path | None = None,
             for meta in store.statements(account["slug"]):
                 if meta["status"] == "parsed" and meta["history"]:
                     parsed_counts[meta["history"][-1].get("key", "")] += 1
-        return [{"key": key, "description": _description(key),
+        return [{"key": key, "description": _description(key, registry_root),
                  "accounts": sum(1 for a in accounts
                                  if a["registry_key"] == key),
-                 "statements": parsed_counts[key]}
+                 "statements": parsed_counts[key],
+                 # revision provenance (§2.3): what a load would exec, when
+                 # it last changed, and how many overlay saves it took
+                 "sha16": sl_registry.current_sha(key, registry_root),
+                 "updated_at": _updated_at(key, registry_root),
+                 "revisions": len(sl_registry.parser_history(
+                     key, registry_root))}
                 for key in sl.keys(registry_root)]
 
     @app.get("/registry")

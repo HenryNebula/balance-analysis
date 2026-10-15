@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import statementledger as sl
+from statementledger import registry as sl_registry
 
 from web import parsing
 from web.agent_events import TraceDeriver
@@ -183,7 +184,9 @@ class RunManager:
                  # env may point at another app instance's (or the dev
                  # server's) registry, and a verified parser would save there
                  "STATEMENTLEDGER_USER_REGISTRY":
-                     str(self.registry_root)})  # 'workdir:' must
+                     str(self.registry_root),
+                 # ties the parser's history.jsonl record to this run
+                 "STMTLEDGER_RUN_ID": run["id"]})  # 'workdir:' must
         # reach the log NOW, not when the block buffer fills — the manager
         # resolves the trace tail from it while the run is live
         run["pid"] = process.pid
@@ -354,12 +357,9 @@ class RunManager:
         staged parser.py in the workdir (written once, never edited)."""
         try:
             if run.get("key"):
-                from statementledger.registry import REGISTRY, module_path
-
-                path = module_path(run["key"])
-                if not path.exists():
-                    path = REGISTRY / f"{run['key']}.py"
-                return path.read_text()
+                path = sl_registry.parser_file(run["key"], self.registry_root)
+                if path is not None:
+                    return path.read_text()
             workdir = run.get("workdir")
             if workdir:
                 staged = Path(workdir) / "parser.py"
@@ -551,7 +551,9 @@ class RunManager:
                                        [key], overlay=self.registry_root)
                 if result["ok"]:
                     meta = self.store.save_parsed(slug, sid, result["stmt"],
-                                                  key, sl.__version__)
+                                                  key, sl.__version__,
+                                                  parser_sha=sl_registry.current_sha(
+                                                      key, self.registry_root))
                     outcomes.append({"id": sid, "status": "parsed",
                                      "transactions": (meta["summary"] or {})
                                      .get("transactions")})
