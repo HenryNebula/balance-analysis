@@ -19,7 +19,8 @@ Or from the shell:
 $ statementledger statement.pdf --key us__bank__product__1
 ```
 
-Runtime dependency: **one** — [pdfplumber](https://github.com/jsvine/pdfplumber).
+Runtime dependencies: **two** — [pdfplumber](https://github.com/jsvine/pdfplumber)
+(layout extraction) and pikepdf (PDF triage / font healing).
 
 ## The idea
 
@@ -51,6 +52,16 @@ product, keyed `cc__bank__product__n` (country, bank, product, version):
   rows (the stress test)
 - `us__bluelantern__savings__1` — single signed Amount column with
   `(parenthesised)` negatives (the minimal example — read it first)
+- eight more distilled from statement templates: `ca__harbour_bank__business__1`,
+  `ca__jpmorgan__dda__1`, `hk__silk_road__business__1`,
+  `nl__continentaltrust__personal__1`, `sg__standard_chartered__savings__1`,
+  `us__fidelity__portfolio__1`, `us__jpmorgan_chase__checking__1`,
+  `us__liberty_national__credit__1`
+
+A key names a real institution only where the parser was distilled from
+that bank's statement template — the module is layout logic and nothing
+else: every value is derived at runtime from the PDF, and the distill gate
+lints parser code against transcribed statement data.
 
 `sl.parse(pdf)` without a key tries every registered parser and returns the
 first that verifies.
@@ -74,8 +85,8 @@ tree; git is their changelog.
 
 ## Adding a bank: the distill agent
 
-You do not write parsers by hand (though you can — the registry modules are
-~60 lines each). `tools/distill_agent.py` runs a tool-calling agent that
+You do not write parsers by hand (though you can — the registry modules
+run 72–137 lines). `tools/distill_agent.py` runs a tool-calling agent that
 explores the statement (render/grep/table/python tools), builds `parser.py`
 step by step (write/edit tools), and gates it on the same arithmetic
 (`run`) — a VERIFIED run registers the parser; nothing ships until it
@@ -102,34 +113,41 @@ model honest: it can look, but not smuggle statement data into code.
 
 `web/` is a single-user web UI over the library: accounts as folders,
 drag-in PDF upload, parse with the registry, and hard verification failures
-shown as first-class outcomes (per-parser attempts, not stack traces). No
-database — the filesystem under `data/` is the store. Design:
+shown as first-class outcomes (per-parser attempts, not stack traces). The
+UI is a React SPA (`web/frontend`: Vite + TypeScript) served by a FastAPI
+JSON API that content-negotiates the same URLs for browsers and the app.
+No database — the filesystem under `STMTLEDGER_WEB_DATA` (repo-relative
+`data/` by default; `tools/serve_web.sh` sets it to
+`~/.local/share/statementledger`) is the store. Design:
 [docs/web-ui-design.md](docs/web-ui-design.md).
+
+The one-liner — builds the SPA on first run, binds 127.0.0.1:8765:
+
+```console
+$ tools/serve_web.sh
+```
+
+or by hand (note the SPA build step — without it the server is API-only):
 
 ```console
 $ uv sync --group web
+$ cd web/frontend && npm ci && npm run build && cd ../..
 $ uv run --group web uvicorn web.app:app --host 127.0.0.1 --port 8765
 ```
 
-The web stack (FastAPI + Jinja2 + htmx, vendored) lives in a separate
-dependency group; the wheel still ships only `statementledger`. **No auth,
-localhost only** — statements are sensitive financial data. Do not
-port-forward or run on a shared host.
+The web dependencies live in a separate dependency group; node/npm is only
+needed to build the SPA; the wheel still ships only `statementledger`.
+**No auth, localhost only** — statements are sensitive financial data. Do
+not port-forward or run on a shared host.
 
 Storage is durable and repo-independent: everything the app writes at
 runtime — accounts, statements, runs, **and parsers distilled through the
-UI** — lives under `STMTLEDGER_WEB_DATA` (default
-`~/.local/share/statementledger`). Distilled parsers go to a user-registry
-*overlay* (`data/registry/`, shadowing same-key built-ins) and are user
-data, never committed — CLI-initiated distills land in the same tree by
-default, each save revisioned under `data/registry/.history/`; the shipped
-`src/statementledger/registry/` stays curated. To seed the demo accounts
-into that store:
-
-```console
-$ STMTLEDGER_WEB_DATA=~/.local/share/statementledger \
-      uv run --group web python tools/ui_review/seed.py
-```
+UI** — lives under `STMTLEDGER_WEB_DATA`. Distilled parsers go to a
+user-registry *overlay* (`<data>/registry/`, shadowing same-key built-ins)
+and are user data, never committed — CLI-initiated distills land in the
+same tree by default, each save revisioned under
+`<data>/registry/.history/`; the shipped `src/statementledger/registry/`
+stays curated.
 
 When no registered parser verifies a statement, the UI offers one click into
 the distill harness: launch a run (draft for a new bank, maintain to evolve

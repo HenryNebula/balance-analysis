@@ -1,6 +1,6 @@
 """Parse orchestration for the web layer: the structured unrolling of
 sl.parse()'s try-every-candidate loop, so the UI gets per-parser verdicts
-instead of one exception string (docs/web-ui-design.md §3.4, §7).
+instead of one exception string (docs/web-ui-design.md §4.4, §7).
 
 One frames extraction per PDF (pdfplumber is the expensive step); every
 candidate parser is then evaluated against those frames. Outcomes carry

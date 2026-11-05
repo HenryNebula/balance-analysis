@@ -22,6 +22,7 @@ This project builds on ideas and code borrowed from transtractor
 transtractor's own word-extraction floor is pdfsink-rs (MIT,
 https://crates.io/crates/pdfsink-rs), a Rust library that explicitly mirrors
 pdfplumber's extraction semantics — which is why pdfplumber
-(MIT, https://github.com/jsvine/pdfplumber) is this package's single
-runtime dependency and the frames produced here are drop-in compatible
-with what transtractor produced.
+(MIT, https://github.com/jsvine/pdfplumber) is this package's core
+runtime dependency (pikepdf, for PDF triage and repair, is the other) and
+the frames produced here are drop-in compatible with what transtractor
+produced.

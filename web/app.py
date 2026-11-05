@@ -564,7 +564,7 @@ def create_app(data_root: Path | None = None,
                  "accounts": sum(1 for a in accounts
                                  if a["registry_key"] == key),
                  "statements": parsed_counts[key],
-                 # revision provenance (§2.3): what a load would exec, when
+                 # revision provenance (§3.3): what a load would exec, when
                  # it last changed, and how many overlay saves it took
                  "sha16": sl_registry.current_sha(key, registry_root),
                  "updated_at": _updated_at(key, registry_root),

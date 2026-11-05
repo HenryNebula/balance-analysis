@@ -34,7 +34,7 @@ def test_full_agent_arc():
     new = "    return {'transactions': []}"
     code_v2 = code_v1.replace(old, new)
     trace = "".join([
-        section("run start", "mode=qwen3.5-4b at http://127.0.0.1:30000/v1\n"
+        section("run start", "mode=demo-4b at http://127.0.0.1:8080/v1\n"
                             "pdfs=['a.pdf']"),
         section("frames", "1 statement(s); a.pdf: 120 lines"),
         section("tool call: render", '{"start": 0, "n": 40}'),
@@ -73,7 +73,7 @@ def test_full_agent_arc():
     events += deriver.close()  # the manager's final pump flushes the tail
 
     assert types(events)[:3] == ["run_started", "frames", "tool"]
-    assert events[0]["model"] == "qwen3.5-4b"
+    assert events[0]["model"] == "demo-4b"
     tools = [e for e in events if e["type"] == "tool"]
     assert [t["name"] for t in tools] == ["render", "write", "run",
                                           "edit", "run"]
