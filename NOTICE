@@ -2,7 +2,7 @@ NOTICE — attributions
 =====================
 
 This project builds on ideas and code borrowed from transtractor
-(MIT, Copyright 2025 Daniel Weber — https://crates.io/crates/transtractor):
+(MIT, Copyright 2025 Daniel Weber — https://github.com/weberdak/transtractor-lib):
 
 - src/statementledger/frames.py is a faithful Python port of transtractor's
   pdf_to_text_items / text_items_to_layout pipeline (word extraction with
