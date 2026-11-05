@@ -1,5 +1,8 @@
 # statementledger
 
+[![CI](https://github.com/HenryNebula/balance-analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/HenryNebula/balance-analysis/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/statementledger.svg)](https://pypi.org/project/statementledger/)
+
 Bank statement PDFs to **verified** ledgers.
 
 ```python
