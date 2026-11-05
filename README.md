@@ -22,10 +22,10 @@ Or from the shell:
 $ statementledger statement.pdf --key us__bank__product__1
 ```
 
-Runtime dependencies: **two** — [pdfplumber](https://github.com/jsvine/pdfplumber)
-(layout extraction) and pikepdf (PDF triage / font healing). The distill
-agent ships in the package as an optional extra —
-`pip install 'statementledger[agent]'` (adds jinja2, for its prompts).
+Runtime dependencies: **three** — [pdfplumber](https://github.com/jsvine/pdfplumber)
+(layout extraction), pikepdf (PDF triage / font healing), and jinja2 (the
+distill agent's prompt templates — the agent ships in the package, no
+extra install needed).
 
 ## The idea
 

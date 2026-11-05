@@ -41,13 +41,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-try:
-    from jinja2 import Environment, FileSystemLoader, StrictUndefined
-except ImportError as _jinja_error:  # the agent is an optional extra
-    raise SystemExit(
-        "statementledger's distill agent needs jinja2 for its prompts.\n"
-        "Install it with:  pip install 'statementledger[agent]'"
-    ) from _jinja_error
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from statementledger.env import load_env
 
