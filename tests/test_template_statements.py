@@ -3,9 +3,9 @@ and hygiene gates for statements filled from real-world Word templates.
 
 Three corpora live under data/gen/ (© TemplateLab-derived; template and
 generated files stay in gitignored data/), so these tests SKIP on
-machines without them — the committed proof of the pipelines lives in
-docs/template-statement-visual-review.md (ui-review-loop, GA: YES for
-each corpus).
+machines without them. The visual-review verdicts (ui-review-loop, GA:
+YES for each corpus) are recorded in the local ui-review artifacts,
+which are not shipped with the repo.
 
 Per corpus and across months, gated here:
 - layout scan (tools/templates/layout_scan.py, per-template config):
