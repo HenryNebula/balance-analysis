@@ -30,6 +30,10 @@ Changelog = "https://github.com/HenryNebula/balance-analysis/releases"
 
 [project.scripts]
 statementledger = "statementledger.cli:main"
+statementledger-distill = "statementledger.agent:main"
+
+[project.optional-dependencies]
+agent = ["jinja2>=3.1"]
 
 [build-system]
 requires = ["hatchling"]

@@ -5,7 +5,7 @@ docs/bank-statement-datasets.md; any dir with *.pdf + metadata.jsonl works)
 x every registered parser: does it verify? Then flag anything that is not a
 clean 1:1 mapping:
 
-  - a statement with no verifier (distill it: tools/distill_agent.py)
+  - a statement with no verifier (distill it: statementledger-distill)
   - a statement with >1 verifier (ambiguity: pin the account to one key)
   - a verifier whose transaction count != the corpus metadata's count
     (verified arithmetic over partial coverage — e.g. one account of a

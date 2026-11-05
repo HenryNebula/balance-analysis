@@ -134,7 +134,7 @@ Three concepts map onto disk 1:1:
 ```
 
 The agent's own working directory stays where it has always been:
-`logs/distill_<YYYYMMDD_HHMMSS>_<stem>/` (see `tools/distill_agent.py`),
+`logs/distill_<YYYYMMDD_HHMMSS>_<stem>/` (see `statementledger.agent`),
 referenced from `run.json`. `logs/` is gitignored; so is a repo-relative
 `data/`.
 
@@ -314,8 +314,8 @@ string: extract frames once with `frames_for`, then for each key from
 ### 4.5 CLI (for copy-paste instructions)
 
 `statementledger <pdf> [--key KEY]` (`statementledger.cli`). Distill
-agent: `tools/distill_agent.py <pdfs…> [--key K] [--turns N] [--no-save]
-[--built-in]`, env
+agent: `statementledger-distill <pdfs…> [--key K] [--turns N] [--no-save]
+[--built-in]` (console script for `statementledger.agent`), env
 `STATEMENTLEDGER_LLM_URL/MODEL/API_KEY/PROVIDER/REASONING/TURNS/TIMEOUT`
 (`.env.example`); a verified run saves into the user overlay with a
 revision record (`--built-in`: into `src/statementledger/registry/`, git
@@ -442,7 +442,7 @@ budget, model name from env, cost/latency warning, [Launch run] → run view.
 │   [ Register new bank for this statement… ]   ← launches a distill run (§6.4)  │
 │                                                                               │
 │   …or run it yourself:                                                         │
-│   $ uv run python tools/distill_agent.py   \                                   │
+│   $ statementledger-distill                \                                   │
 │         <data>/accounts/bluelantern-savings/statements/3f9c…/original.pdf \    │
 │         --max-probes 8                                                         │
 │   (needs STATEMENTLEDGER_LLM_* in .env — see .env.example)                     │
@@ -587,14 +587,14 @@ The agent is minutes-long (default 30 LLM rounds), costs money, needs
 `STATEMENTLEDGER_LLM_*` secrets, and runs sandboxed children — it is a
 tracked, cancellable subprocess, never inline in a request.
 
-- **Spawn**: `uv run python tools/distill_agent.py <stored original.pdf
+- **Spawn**: `python -m statementledger.agent <stored original.pdf
   paths…> [--key K] [--rounds N] [--max-probes N] --jsonl-trajectory
   <data>/runs/<id>/events.jsonl` — cwd = repo root, env inherited *plus*
-  `.env` loaded via `tools/envloader.py` (the key never reaches the
+  `.env` loaded via `statementledger.env` (the key never reaches the
   browser; the server process itself doesn't need the env at boot).
 - **Trajectory as data**: the agent's `Trace` writes `events.jsonl` beside
   its `trace.log` at the existing call sites (`Trace.emit` in
-  `tools/distill_agent.py`), always on. The run manager tails it verbatim
+  `statementledger.agent`), always on. The run manager tails it verbatim
   and re-emits it over SSE; `run.json` records argv, pid, account,
   statement ids, status, timestamps — reload-safe.
 - **Attach mode / legacy fallback**: a run started manually in a terminal

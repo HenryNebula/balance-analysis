@@ -23,7 +23,9 @@ $ statementledger statement.pdf --key us__bank__product__1
 ```
 
 Runtime dependencies: **two** — [pdfplumber](https://github.com/jsvine/pdfplumber)
-(layout extraction) and pikepdf (PDF triage / font healing).
+(layout extraction) and pikepdf (PDF triage / font healing). The distill
+agent ships in the package as an optional extra —
+`pip install 'statementledger[agent]'` (adds jinja2, for its prompts).
 
 ## The idea
 
@@ -89,18 +91,22 @@ tree; git is their changelog.
 ## Adding a bank: the distill agent
 
 You do not write parsers by hand (though you can — the registry modules
-run 72–137 lines). `tools/distill_agent.py` runs a tool-calling agent that
+run 72–137 lines). `statementledger-distill` (the console script for
+`statementledger.agent`, included in the package) runs a tool-calling agent that
 explores the statement (render/grep/table/python tools), builds `parser.py`
 step by step (write/edit tools), and gates it on the same arithmetic
 (`run`) — a VERIFIED run registers the parser; nothing ships until it
 reconciles:
 
 ```console
-$ uv run python tools/distill_agent.py newbank_statement.pdf
+$ statementledger-distill newbank_statement.pdf
 ...
-$ uv run python tools/distill_agent.py --key us__newbank__checking__1 \
+$ statementledger-distill --key us__newbank__checking__1 \
       january.pdf february.pdf   # MAINTAIN: evolve a registered parser
 ```
+
+(In a repo checkout: `uv run statementledger-distill …`, or
+`uv run python -m statementledger.agent …`.)
 
 A verified run saves into the user overlay with a revision record
 (`--no-save` drafts without writing anything). To promote a parser into the

@@ -649,7 +649,7 @@ def test_run_cancel(tmp_path):
 
 def test_attach_to_existing_run(run_client):
     result = subprocess.run(  # a real agent run, no trajectory flag
-        [sys.executable, "tools/distill_agent.py", str(BLUE),
+        [sys.executable, "-m", "statementledger.agent", str(BLUE),
          "--script", str(CANNED_FULL), "--no-save"],
         cwd=REPO, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0

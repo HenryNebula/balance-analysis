@@ -8,16 +8,18 @@ no whole-script re-emission (parser.py is the state, edit fixes one spot),
 no probe/script distinction (python IS the ad-hoc tool), and no submission
 protocol (run verifies or names exactly what to fix).
 
-Usage (from the repo root):
-    uv run python tools/distill_agent.py statement1.pdf [statement2.pdf ...]
-    uv run python tools/distill_agent.py --script my_parser.py stmt.pdf
+Usage:
+    statementledger-distill statement1.pdf [statement2.pdf ...]
+    statementledger-distill --script my_parser.py stmt.pdf
         # canned: stage the file as parser.py, lint + gate once, no model
-    uv run python tools/distill_agent.py --key us__bank__prod__1 old.pdf new.pdf
+    statementledger-distill --key us__bank__prod__1 old.pdf new.pdf
         # MAINTAIN: parser.py starts from the registry source; old statements
         # are the regression set; KEY is pinned
-    uv run python tools/distill_agent.py --built-in --script my_parser.py stmt.pdf
+    statementledger-distill --built-in --script my_parser.py stmt.pdf
         # PROMOTE: save into src/statementledger/registry/ instead of the
         # user overlay (git is the built-in changelog; no history.jsonl)
+    # repo checkout without the console script on PATH:
+    uv run python -m statementledger.agent statement1.pdf
 """
 
 from __future__ import annotations
@@ -39,9 +41,15 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
+try:
+    from jinja2 import Environment, FileSystemLoader, StrictUndefined
+except ImportError as _jinja_error:  # the agent is an optional extra
+    raise SystemExit(
+        "statementledger's distill agent needs jinja2 for its prompts.\n"
+        "Install it with:  pip install 'statementledger[agent]'"
+    ) from _jinja_error
 
-from envloader import load_env
+from statementledger.env import load_env
 
 load_env()
 
@@ -1439,7 +1447,8 @@ def main() -> int:
         changelog = ("git history is the parser's changelog"
                      if args.built_in else
                      "the overlay's history.jsonl is the parser's changelog "
-                     "(tools/registry_history.py)")
+                     "(history.jsonl beside the parser; tools/"
+                     "registry_history.py in the repo)")
         print(f"maintained in place: {len(diff)} lines changed ({changelog})")
         trace.log("maintenance diff", "\n".join(diff[:80]))
     if args.no_save:

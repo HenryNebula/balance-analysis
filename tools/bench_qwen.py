@@ -2,8 +2,9 @@
 
     uv run python tools/bench_qwen.py data/bsb/data --runs 5 [--turns 120]
 
-Sequential (one local model slot). Each run is `distill_agent.py <pdf>
---no-save --turns N` with PYTHONPATH pinned to THIS repo's src/ — the
+Sequential (one local model slot). Each run is `python -m
+statementledger.agent <pdf> --no-save --turns N` with PYTHONPATH pinned
+to THIS repo's src/ — the
 editable install can be re-pointed at a worktree by any concurrent `uv
 sync`, and a benchmark must not silently change engines mid-sweep. A
 preflight import check fails the row loudly instead of letting every run
@@ -24,12 +25,11 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "tools"))
-from envloader import load_env  # noqa: E402
+from statementledger.env import load_env  # noqa: E402
 
 load_env()
 
-AGENT = REPO / "tools" / "distill_agent.py"
+AGENT = ["-m", "statementledger.agent"]
 ENV = {**os.environ, "PYTHONPATH": str(REPO / "src")}
 
 
@@ -144,7 +144,7 @@ def main() -> int:
                 continue
             started = time.time()
             proc = subprocess.run(
-                [sys.executable, str(AGENT), doc, "--no-save",
+                [sys.executable, *AGENT, doc, "--no-save",
                  "--turns", str(args.turns)],
                 capture_output=True, text=True, env=ENV, cwd=REPO)
             elapsed = round(time.time() - started)

@@ -1,21 +1,12 @@
 """The tool-calling agent harness — dispatch, loop policy, protocol-safe
 elision, and a scripted end-to-end run through the real gate (no network)."""
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-TOOLS_DIR = Path(__file__).parent.parent / "tools"
-sys.path.insert(0, str(TOOLS_DIR))
-
-spec = importlib.util.spec_from_file_location(
-    "distill_agent", TOOLS_DIR / "distill_agent.py")
-agent = importlib.util.module_from_spec(spec)
-sys.modules["distill_agent"] = agent
-spec.loader.exec_module(agent)
+import statementledger.agent as agent
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PARSER = (Path(__file__).parent.parent

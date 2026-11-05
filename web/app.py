@@ -133,13 +133,8 @@ def _load_llm_env(repo_root: Path) -> None:
     global _llm_env_loaded
     if _llm_env_loaded:
         return
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "envloader", repo_root / "tools" / "envloader.py")
-    envloader = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(envloader)
-    envloader.load_env()
+    from statementledger.env import load_env
+    load_env(repo_root / ".env")
     _llm_env_loaded = True
 
 
