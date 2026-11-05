@@ -677,6 +677,7 @@ name = "statementledger"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "jinja2" },
     { name = "pdfplumber" },
     { name = "pikepdf" },
 ]
@@ -684,7 +685,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "httpx" },
-    { name = "jinja2" },
     { name = "pillow" },
     { name = "pytest" },
     { name = "python-docx" },
@@ -692,7 +692,6 @@ dev = [
 ]
 web = [
     { name = "fastapi" },
-    { name = "jinja2" },
     { name = "pillow" },
     { name = "pypdfium2" },
     { name = "python-multipart" },
@@ -701,6 +700,7 @@ web = [
 
 [package.metadata]
 requires-dist = [
+    { name = "jinja2", specifier = ">=3.1" },
     { name = "pdfplumber", specifier = ">=0.11" },
     { name = "pikepdf", specifier = ">=10.16.0" },
 ]
@@ -708,7 +708,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "httpx", specifier = ">=0.27" },
-    { name = "jinja2", specifier = ">=3.1.6" },
     { name = "pillow", specifier = ">=10" },
     { name = "pytest", specifier = ">=8" },
     { name = "python-docx", specifier = ">=1.1" },
@@ -716,7 +715,6 @@ dev = [
 ]
 web = [
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "jinja2", specifier = ">=3.1" },
     { name = "pillow", specifier = ">=10" },
     { name = "pypdfium2", specifier = ">=4" },
     { name = "python-multipart", specifier = ">=0.0.9" },

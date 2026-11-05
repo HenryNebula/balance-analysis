@@ -3,11 +3,11 @@
 This is the LEGACY path: workdirs from agents before structured emission
 (and any trace.log someone points the attach mode at). Current agents emit
 the same event vocabulary directly into events.jsonl beside their trace.log
-(tools/distill_agent.py Trace.emit); the web run manager prefers that file
+(statementledger.agent Trace.emit); the web run manager prefers that file
 and falls back to this derivation — the vocabulary below is shared, so a
 run view renders identically either way.
 
-tools/distill_agent.py is an OpenAI tool-calling loop whose run artifacts
+statementledger.agent is an OpenAI tool-calling loop whose run artifacts
 (besides the evolving parser.py) are an append-only trace.log of bracketed
 sections plus bare one-line notes, and the events.jsonl it derives from
 them. This deriver tails trace.log and folds new bytes into the SAME SSE

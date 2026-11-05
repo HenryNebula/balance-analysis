@@ -1,0 +1,42 @@
+name: Release
+
+# Publishes the statementledger library (wheel + sdist, library only —
+# web/ and tools/ stay out of the package) to PyPI via trusted
+# publishing (OIDC): no tokens; PyPI must have this repo + workflow
+# registered as a (pending) trusted publisher for "statementledger".
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # PyPI trusted publishing
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Sync + test before publishing (SPA/corpora tests skip — library gate is what matters)
+        run: |
+          uv sync --group web --locked
+          uv run --group web pytest -q
+
+      - name: Tag must match pyproject version
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          grep -q "version = \"$v\"" pyproject.toml \
+            || { echo "tag $GITHUB_REF_NAME does not match pyproject version $v"; exit 1; }
+
+      - name: Build
+        run: uv build
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

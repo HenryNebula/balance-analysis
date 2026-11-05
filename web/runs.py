@@ -1,7 +1,8 @@
 """Distill-agent run tracking (docs/web-ui-design.md §8.2, §9): the one
 real background job.
 
-The manager spawns tools/distill_agent.py as a tracked subprocess. The
+The manager spawns the distill agent (python -m statementledger.agent)
+as a tracked subprocess. The
 agent EMITS its own trajectory: an append-only events.jsonl in the workdir
 it prints as `workdir: ...` on stdout. A watcher thread per run tails that
 file into data/runs/<id>/events.jsonl, and the app relays it over SSE.
@@ -165,7 +166,7 @@ class RunManager:
         return run
 
     def _spawn(self, run: dict, events_path: Path) -> None:
-        argv = [sys.executable, "tools/distill_agent.py"]
+        argv = [sys.executable, "-m", "statementledger.agent"]
         argv += [str(self.store.original_pdf(run["account_slug"], sid))
                  for sid in run["statement_ids"]]
         if run["turns"]:

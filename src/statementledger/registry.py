@@ -7,7 +7,7 @@ Each registry module lives at statementledger/registry/<key>.py and defines
 
 Modules are loaded by key, checked for the contract, and shipped in the
 wheel — a registered parser parses FUTURE months of the same bank with no
-LLM in the loop. A new bank means one new module (see tools/distill_agent.py).
+LLM in the loop. A new bank means one new module (see statementledger.agent).
 
 Two layers, in precedence order:
 
