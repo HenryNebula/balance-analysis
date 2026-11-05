@@ -4,7 +4,7 @@ One account = one folder under <data_root>/accounts/<slug>/; one statement =
 one content-addressed folder statements/<sha256[:16]>/ holding the immutable
 original.pdf, the derived statement.json (written only after a verified
 parse), and meta.json (upload metadata, status, append-only parse history).
-Layout and field names follow docs/web-ui-design.md §2.
+Layout and field names follow docs/web-ui-design.md §3.
 
 Thread safety: a per-account lock (account_lock) serializes parse-and-write
 per account; JSON writes are atomic (tmp file + os.replace) so a reader
@@ -171,7 +171,7 @@ class Store:
                     statementledger_version: str,
                     parser_sha: str | None = None) -> dict:
         """Overwrite statement.json (derived data) and append one history
-        entry; re-parses never erase history (§2.3). `parser_sha` pins the
+        entry; re-parses never erase history (§3.3). `parser_sha` pins the
         exact registry revision that produced this ledger (provenance:
         a stored ledger stays re-derivable against it)."""
         directory = self._statement_dir(slug, sid)

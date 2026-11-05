@@ -18,7 +18,7 @@ A statement arrives as FRAMES — extracted layout, plain data
                              "items": [[text, x1, x2], ...]}, ...]}
 
 Writing a parser for a new bank is a REPL loop with an LLM (or by hand): the
-distill harness in tools/distill_harness.py probes the frames, drafts
+distill agent in tools/distill_agent.py probes the frames, drafts
 parse(), and gates every round on validate + reconcile — nothing is
 registered until it reconciles.
 

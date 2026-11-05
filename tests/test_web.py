@@ -1,4 +1,4 @@
-"""Web UI Phase 1 (docs/web-ui-design.md §11): accounts, upload + sync parse
+"""Web UI Phase 1 (docs/web-ui-design.md, design-history appendix): accounts, upload + sync parse
 (pinned and detection), statement detail, failures surfaced with structured
 per-parser attempts, registry pages. Runs against a temp data root."""
 
@@ -105,7 +105,7 @@ def test_upload_duplicate(client):
 def test_upload_pinned_wrong_key_fails_with_attempts(client, tmp_path):
     create(client, "Blue Lantern Savings", key=COPPER_KEY)
     response = upload(client, "blue-lantern-savings", BLUE)
-    assert response.status_code == 200  # domain outcome, not an error (§4)
+    assert response.status_code == 200  # domain outcome, not an error (§2)
     body = response.json()
     assert body["status"] == "failed"
     assert [a["key"] for a in body["attempts"]] == [COPPER_KEY]
@@ -262,7 +262,7 @@ def test_registry(client, tmp_path):
     assert keys[BLUE_KEY]["statements"] == 1  # usage counts for the SPA
     import statementledger as sl
     assert set(keys) == set(sl.keys())  # every module, docstring or not
-    # revision provenance columns (§2.3): a built-in row carries the sha of
+    # revision provenance columns (§3.3): a built-in row carries the sha of
     # the file a load would exec and its mtime, with no overlay history
     from statementledger import registry
     row = keys[BLUE_KEY]
@@ -522,7 +522,7 @@ def test_run_converges_and_auto_parses(run_client, tmp_path):
         headers=JSON).json()
     assert parsed["verified"] is True
 
-    # the auto-parse pinned the exact parser revision (provenance §2.3)
+    # the auto-parse pinned the exact parser revision (provenance §3.3)
     from statementledger import registry
     meta = json.loads((tmp_path / "data" / "accounts" / "blue-lantern-savings"
                        / "statements" / sid / "meta.json").read_text())

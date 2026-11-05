@@ -35,8 +35,12 @@ data/
 # Build artifacts
 dist/
 
-# node (ui-review tour harness, web/frontend SPA — dev-only)
+# node (web/frontend SPA build — dev-only)
 node_modules/
+
+# Local QA loop: ui-review tour harness + template-corpora review log
+tools/ui_review/
+docs/template-statement-visual-review.md
 
 # macOS finder artifacts
 .DS_Store

@@ -547,7 +547,7 @@ def footer(ctx: "Ctx", turn: int, turns: int) -> str:
 def message_chars(messages: list[dict]) -> int:
     """Total payload chars — content AND tool-call arguments. A write's
     parser source and a python probe's code ride in the arguments; not
-    counting them made compaction fire ~57% late in the qwen runs."""
+    counting them made compaction fire ~57% late in long local-model runs."""
     total = 0
     for message in messages:
         total += len(str(message.get("content", "")))
